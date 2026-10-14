@@ -1,0 +1,43 @@
+# === R ===
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+.Renviron
+
+# === Dati e output pesanti / riproducibili (NON versionare) ===
+# I dati (trascrizioni degli episodi) sono soggetti a copyright e non
+# vengono ridistribuiti: si rigenerano con gli script in R/. Vedi data/README.md
+data/*.RData
+data/*.rds
+data/*.csv
+!data/README.md
+
+# Risultati dei modelli (rigenerabili dal codice)
+*.RData
+models/
+
+# === Sistema operativo ===
+.DS_Store
+Thumbs.db
+
+# === Editor ===
+.vscode/
+.idea/
+
+# === Scheda CV (uso personale, non va nel repo pubblico) ===
+cv-entry.md
+
+# === Python (usato solo marginalmente) ===
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# === Report HTML pesante (15 MB) — ESCLUSO TEMPORANEAMENTE dal repo ===
+# Rallentava troppo il push su connessione lenta. Da ricaricare con una
+# connessione migliore, oppure rigenerare in versione piu' leggera
+# (figure esterne invece che in base64). Per riaggiungerlo: togliere questa
+# riga e fare `git add report/progetto_completo.html`.
+report/progetto_completo.html

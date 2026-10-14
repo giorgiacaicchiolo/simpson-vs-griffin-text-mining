@@ -1,0 +1,56 @@
+# Pacchetti R richiesti dal progetto
+# Dedotti dagli import reali negli script R/ e nel report Rmd.
+#
+# Installazione rapida (da console R):
+#   pkgs <- readLines("requirements-R.txt")
+#   pkgs <- pkgs[!grepl("^\\s*#|^\\s*$", pkgs)]
+#   install.packages(setdiff(pkgs, rownames(installed.packages())))
+#
+# NB: quanteda.textstats si installa insieme a quanteda; textdata scarica
+# i lessici di sentiment al primo utilizzo (richiede conferma interattiva).
+
+# --- Manipolazione dati e utility ---
+tidyverse
+dplyr
+tidyr
+stringr
+purrr
+lubridate
+reshape2
+
+# --- Web scraping ---
+rvest
+httr
+
+# --- Text mining / NLP ---
+tidytext
+tm
+tokenizers
+textstem
+SnowballC
+quanteda
+quanteda.textstats
+textdata
+
+# --- Topic modeling ---
+topicmodels
+lda
+ldatuning
+stm
+LDAvis
+tsne
+
+# --- Visualizzazione ---
+ggplot2
+ggwordcloud
+wordcloud
+RColorBrewer
+cowplot
+gridExtra
+patchwork
+
+# --- Report e calcolo parallelo ---
+knitr
+parallel
+future
+future.apply

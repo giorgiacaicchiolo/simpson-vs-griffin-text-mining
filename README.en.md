@@ -1,0 +1,156 @@
+# Comparative Text Analysis: *The Simpsons* vs *Family Guy*
+
+🇬🇧 **English** · 🇮🇹 [Italiano](README.md)
+
+**Text mining**, **topic modeling** and **sentiment analysis** on the episode
+dialogue of two of the longest-running American animated sitcoms, *The Simpsons*
+and *Family Guy*, to compare their similarities, differences and evolution over time.
+
+> Built in **R** for a master's-level social-media / text-mining course (2025).
+
+---
+
+## Context and goal
+
+The two shows share format and audience but differ in style, language and tone. This
+project quantifies those differences starting from the script texts, collected via
+**web scraping** and analysed along three axes:
+
+- **Text mining** — word frequencies, n-grams, *keyness*, term associations;
+- **Topic modeling** — *Latent Dirichlet Allocation* (LDA) and *Structural Topic
+  Modeling* (STM) with covariates (show, year, sitting US president, showrunner);
+- **Sentiment analysis** — dialogue polarity by show, season and topic, correlated
+  with IMDb ratings.
+
+## Dataset
+
+| | |
+|---|---|
+| **Text source** | [springfieldspringfield.co.uk](https://www.springfieldspringfield.co.uk) (episode transcripts) |
+| **Ratings/plots source** | [IMDb](https://www.imdb.com) |
+| **Size** | **1,216 episodes** (784 *Simpsons*, 432 *Family Guy*) |
+| **Coverage** | *The Simpsons* seasons 1–36 (1989–2024), *Family Guy* seasons 1–23 |
+| **Text language** | English |
+
+> ⚠️ **Data is not included in this repository.** The transcripts are copyrighted
+> material: only the **code** that collects and processes them is shared. All
+> `.RData` files are regenerable from the scripts — see [`data/README.md`](data/README.md).
+
+## Method
+
+1. **Collection** (`R/01_scraping.R`) — scraping of scripts and IMDb metadata.
+2. **Pre-processing** (`R/02_preprocessing.R`) — removal of theme songs, stage
+   directions, voice-overs and OCR errors; tokenisation, lemmatisation, stop-word
+   removal (standard list + a custom list of character names).
+3. **Analysis** — text mining (`R/03_text_mining.R`, `R/07_associations.R`), topic
+   modeling (`R/04_lda.R`, `R/05_stm.R`) and sentiment (`R/06_sentiment.R`).
+4. **Report** — everything is documented narratively in
+   [`report/progetto_completo.Rmd`](report/progetto_completo.Rmd) (with appendices on
+   scraping and helper functions).
+
+Seeds are fixed (`set.seed(42)`) where randomness affects results.
+
+## Results
+
+Key findings (full details in the report):
+
+**Linguistic differences.** *Family Guy* uses a more transgressive register (*hell*,
+*damn* far more frequent); *The Simpsons* keeps a more neutral, family-friendly tone.
+
+<p align="center">
+  <img src="figures/wordcloud_simpson.png" width="48%" alt="Simpsons wordcloud">
+  <img src="figures/wordcloud_sentiment_simpson.png" width="48%" alt="Most polarised words, Simpsons">
+</p>
+
+**Character evolution.** Comparing the first and last *Simpsons* season shows the
+shift from **Bart** to **Homer** as the central figure (consistent with creator Matt
+Groening's own account).
+
+<p align="center">
+  <img src="figures/frequenze_s1_vs_s36.png" width="70%" alt="Relative word frequencies, Simpsons season 1 vs 36">
+</p>
+
+**Topic modeling.** LDA identifies **9 macro-topics** shared by both shows: family
+life, romantic relationships, entertainment & media, Christmas holidays, anomalous
+events, school, work & money, marriage, politics & current affairs — handled with
+different tones (more cynical in *Family Guy*). STM reveals non-linear temporal
+effects.
+
+**Sentiment.** *The Simpsons* shows a more **positive and stable** average sentiment;
+*Family Guy* swings lower, though trending upward in recent seasons.
+
+<p align="center">
+  <img src="figures/sentiment_per_topic_anno.png" width="80%" alt="Sentiment trend by topic and year">
+</p>
+
+> 📄 The full rendered report with all charts is
+> [`report/progetto_completo.html`](report/progetto_completo.html) (download and open
+> in a browser).
+
+## How to reproduce
+
+Requirements: **R ≥ 4.2**. Install the packages listed in
+[`requirements-R.txt`](requirements-R.txt):
+
+```r
+pkgs <- readLines("requirements-R.txt")
+pkgs <- pkgs[!grepl("^\\s*#|^\\s*$", pkgs)]
+install.packages(setdiff(pkgs, rownames(installed.packages())))
+```
+
+Then run the scripts in numeric order (they create the `.RData` files in `data/`):
+
+```
+R/01_scraping.R  →  R/02_preprocessing.R  →  R/03_text_mining.R
+R/04_lda.R  →  R/05_stm.R  →  R/06_sentiment.R  →  R/07_associations.R
+```
+
+Finally, to re-render the report:
+
+```r
+rmarkdown::render("report/progetto_completo.Rmd")
+```
+
+> ⚠️ The report loads pre-computed `.RData` objects (the LDA/STM models are
+> computationally expensive). A full from-scratch reproduction requires running the
+> pipeline scripts above first, which generate them.
+
+## Repository structure
+
+```
+.
+├── R/                      # analysis pipeline (numbered scripts)
+│   ├── 01_scraping.R         # scripts + IMDb ratings collection
+│   ├── 02_preprocessing.R    # text cleaning and pre-processing
+│   ├── 03_text_mining.R      # frequencies, n-grams, keyness
+│   ├── 04_lda.R              # Latent Dirichlet Allocation
+│   ├── 05_stm.R              # Structural Topic Modeling
+│   ├── 06_sentiment.R        # sentiment analysis (show / topic / time)
+│   └── 07_associations.R     # term associations
+├── report/
+│   ├── progetto_completo.Rmd   # reproducible report (source)
+│   └── progetto_completo.html  # rendered report
+├── figures/                # selected charts for the README
+├── data/                   # empty: data is regenerated (see data/README.md)
+├── index.html              # landing page for GitHub Pages (links to the report)
+├── requirements-R.txt      # R packages
+├── LICENSE                 # MIT
+└── README.en.md
+```
+
+## Tech stack
+
+**R** · `tidyverse` · `tidytext` · `quanteda` · `tm` · **topic modeling**
+(`topicmodels`, `stm`, `lda`, `ldatuning`, `LDAvis`) · **sentiment** (`textdata`) ·
+**scraping** (`rvest`, `httr`) · **visualisation** (`ggplot2`, `ggwordcloud`,
+`wordcloud`) · **R Markdown**.
+
+## Authors
+
+Group project by **Giorgia Caicchiolo, Daniele Carollo, Gabriele Paganelli, Riccardo
+Pati, Giorgia Tossici**.
+
+## License
+
+Code released under the [MIT](LICENSE) license. The analysed episode texts are not
+included and remain the property of their respective rights holders.

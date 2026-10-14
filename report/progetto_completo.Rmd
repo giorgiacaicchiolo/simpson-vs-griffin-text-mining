@@ -1,0 +1,2981 @@
+---
+title: "Analisi del testo di Simpson e Griffin"
+author: "Caicchiolo Giorgia, Carollo Daniele, Paganelli Gabriele, Pati Riccardo, Tossici Giorgia"
+date: "2025-06-15"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+## Introduzione
+
+Le serie animate *I Simpson* e *I Griffin* rappresentano due pilastri della cultura pop televisiva americana, capaci di influenzare intere generazioni con il loro umorismo pungente e i loro riferimenti sociopolitici. Pur condividendo un *format* simile e un *target* in parte sovrapponibile, le due serie si differenziano per stile narrativo, linguaggio, contenuti e approccio ai temi trattati.
+
+Il presente progetto si propone di analizzare in chiave comparativa queste due produzioni al fine di esplorare somiglianze e differenze nei contenuti testuali e concettuali delle loro sceneggiature.
+
+A partire dai testi degli episodi, raccolti tramite *scraping* dal sito *Springfield!Springfield!* e opportunamente ripuliti e preprocessati, l’analisi si articola in più fasi: *text mining*, *topic modeling* e *sentiment analysis*.
+
+Si può trovare in Appendice il codice relativo alle fasi di *web scraping* (Appendice A) e *pre-processing* (Appendice C) ed anche un fallimentare tentativo di pulizia dei dati per mezzo di un *Large Language Model* (Appendice B).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts = list(indent=4), warning=FALSE)
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 6,
+  dpi = 96,
+  fig.align = "center",
+  out.width = "100%"
+)
+```
+
+```{r load-libraries, warning=FALSE, include=FALSE}
+# carichiamo le librerie
+library(cowplot)
+library(dplyr)
+library(future)
+library(future.apply)
+library(ggplot2)
+library(ggwordcloud)
+library(gridExtra)
+library(knitr)
+library(LDAvis)
+library(lda)
+library(lubridate)
+library(parallel)
+library(patchwork)
+library(quanteda)
+library(quanteda.textstats)
+library(reshape2)
+library(RColorBrewer)
+library(SnowballC)
+library(stm)
+library(stringr)
+library(textstem)
+library(tidytext)
+library(tidyverse)
+library(tm)
+library(tokenizers)
+library(topicmodels)
+library(tsne)
+library(wordcloud)
+library(textdata)
+set.seed(42)
+```
+
+
+```{r include=FALSE}
+load("data/simpson.RData")
+load("data/simpson_clean.RData")
+load("data/simpson_clean_2.RData")
+load("data/griffin.RData")
+load("data/griffin_clean.RData")
+load("data/griffin_clean_2.RData")
+
+load("data/LDA_k.RData")
+load("data/LDA_k2.RData")
+load("data/LDA_k_g.RData")
+load("data/LDA_k_g2.RData")
+load("data/LDA_k_s.RData")
+load("data/LDA_k_s2.RData")
+load("data/Data_frame_IMDB2.RData")
+
+
+#importante perchè simpson caricato non era ancora lemmatizzato(caricato cosi per avere una versione chiara)
+simpson$testo = lemmatize_strings(simpson$testo)
+griffin$testo = lemmatize_strings(griffin$testo)
+
+# Funzione per elaborare un dataset
+elabora_testo <- function(df) {
+  df %>%
+    unnest_tokens(word, testo) %>%             # tokenizzazione
+    filter(!word %in% stop_words$word) %>%     # rimuove le stopwords standard
+    filter(str_detect(word, "^[a-z]+$")) %>%   # toglie i caratteri non alfabetici
+    mutate(lemma = lemmatize_words(word)) %>%  # lemmatizza
+    count(lemma, sort = TRUE) %>%         
+    filter(!lemma %in% stop_words$word)        
+}
+
+frequenze_simpson <- elabora_testo(simpson) %>% rename(word = lemma, n = n)
+frequenze_griffin <- elabora_testo(griffin) %>% rename(word = lemma, n = n)
+
+rm(elabora_testo)
+gc()
+
+# Unione frequenze
+merged_df <- full_join(frequenze_simpson, frequenze_griffin, by = "word", suffix = c("_1", "_2")) %>%
+  replace_na(list(n_1 = 0, n_2 = 0))
+
+# Stopword personalizzate (poco frequenti e lista dei personaggi)
+stopwords_nostre = c(
+  merged_df$word[merged_df$n_1 < 200 & merged_df$n_2 < 170],
+  'huh', 'hmm', 'ooh', 'mmm', 'shh', 'hoo', 'aah', 'ugh', 'hmmm', 'hey', 'uh',
+  'time', 'gonna', 'gasp', 'whoa', 'yea', 'heh', 'yay', 'ohh', 'woo', 'aye',
+  'ahh', 'wee', 'hee', 'aaah', 'whew', 'aha', 'wha', 'boo', 'doo', 'dee', 'arr'
+)
+
+# lista personaggi
+personaggi = c('homer','marge','bart','lisa','maggie','abe','mona','mrburns',
+               'herb','milhouse','kirk','luann','ned','maude','rod','todd',
+               'agnes','seymour','patty','selma','jacqueline','moe','barney',
+               'lenny','carl','apu','manjula','ralph','wiggum','lou',
+               'eddie','krusty','bob','mel',
+               'groundskeeper_willie','skinner','edna','martin',
+               'nelson','sherri','terri','janey','database','kearney',
+               'dolph','jimbo','miss_hoover','dr_hibbert','nick',
+               'professor_frink','comicguy','duffman','snake',
+               'bumblebee_man','disco_stu','sea_captain','gil','agnes_skinner',
+               'otto','kent_brockman','reverend_lovejoy','helen_lovejoy',
+               'judge_snyder','jasper','lunchlady_doris','agnes',
+               'blue-haired_lawyer','rich_texan','quimby','fat_tony',
+               'legs','louie','lionel','troy','artie_ziff',
+               'rainier_wolfcastle','kodos','kang','itchy','scratchy',
+               "santa's_little_helper",'snowball_ii','snowball_v','grumple',
+               'crazy_cat_lady','cookie_kwan','lindsey_naegle','hibbert',
+               'sarah_wiggum','üters','lewis','wendell','shauna','brandine',
+               'cletus','julio','johnny_tightlips','smithers',
+               'matt_groening','el_barto','hugo','amber_simpson','sara_sloane',
+               'rachel_jordan','bonnie_flanders','connie_flanders',
+               'agnes_flanders','agnes_turnipseed','agnes_flanders',
+               'agnes_turnipseed','agnes_flanders','agnes_turnipseed',
+
+               "peter", "lois", "meg", "chris", "stewie", "brian",
+               "quagmire", "cleveland", "joe", "bonnie",
+               "kevin_swanson", "susie_swanson", "mort", "muriel_#FFD700man", "neil_#FFD700man",
+               "carter", "barbara", "carol_pewterschmidt",
+               "herbert", "consuela", "tom", "jake_tucker", "diane_simmons", "ollie_williams",
+               "tricia", "seamus", "dr._hartman", "jerome", "bruce", "connie_d'amico",
+               "vinny", "mayor_west", "adam", "ernie_the_giant_chicken", "evil_monkey",
+               "bertram", "rupert", "loretta_brown", "cleveland_brown_jr.", "roberta_tubbs",
+               "rallo_tubbs", "angela", "death", "buzz_killington", "paddy_tanniger",
+               "al_harrington", "dr._amanda_rebecca", "evil_stewie", "retep", "king_butt",
+               "human_rupert", "brain_damage_horse", "felicia_day", "ron_perlman", "patrick_stewart",
+               "jillian_russell", "denise_robertson", "connie", "shauna", "alice", "babs",
+               "vinny_griffin", "carol", "derek_wilcox", "jesus_christ", "god", "santa_claus",
+               'joe', 'griffin', 'simpson', 'quagmire', 'springfield', 'tom', 'flanders', 'willie',
+               'simpsons', 'griffin', 'glenn', 'bonnie'
+)
+
+rm(merged_df)
+
+
+# Rimozione delle stopword personalizzate e personaggi
+frequenze_simpson <- frequenze_simpson %>% filter(!word %in% c(stopwords_nostre, personaggi))
+frequenze_griffin <- frequenze_griffin %>% filter(!word %in% c(stopwords_nostre, personaggi))
+
+
+# Funzione per creare DTM da testo
+create_dtm <- function(df, stoplist = NULL, prefix = NULL) {
+  df %>%
+    mutate(
+      doc_prefix = if (!is.null(prefix)) {
+        prefix
+      } else if ("prefix" %in% colnames(df)) {
+        prefix  # usa la colonna esistente
+      } else {
+        "X"  # fallback
+      },
+      doc_id = paste0(
+        doc_prefix, "_S", ifelse(stagione < 10, paste0("0", stagione), stagione),
+        "_E", ifelse(episodio < 10, paste0("0", episodio), episodio)
+      )
+    ) %>%
+    unnest_tokens(word, testo) %>%
+    mutate(word = tolower(word)) %>%
+    filter(str_detect(word, "^[a-z]+$")) %>%
+    mutate(word = lemmatize_words(word)) %>%
+    filter(str_detect(word, "^[a-z]+$")) %>%
+    filter(!word %in% stoplist) %>%
+    filter(nchar(word) > 2 | word %in% c("tv", "dr", "mr")) %>%
+    count(doc_id, word) %>%
+    cast_dtm(document = doc_id, term = word, value = n)
+}
+
+analyze_lda <- function(lda_list_1 = lda_k, lda_list_2 = lda_k2, k, n_top_terms = 50, n_top_docs = 15) {
+
+  # Estrazione delle matrici beta e gamma
+  word_topics_1 <- tidy(lda_list_1[[k]], matrix = "beta")
+  doc_topics_1 <- tidy(lda_list_1[[k]], matrix = "gamma")
+
+  word_topics_2 <- tidy(lda_list_2[[k]], matrix = "beta")
+  doc_topics_2 <- tidy(lda_list_2[[k]], matrix = "gamma")
+
+  # Estrazione dei termini principali
+  top_terms_1 <- word_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+
+  top_terms_2 <- word_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+
+  # Visualizzazione dei termini principali
+  print(
+    top_terms_1 %>%
+      mutate(term = reorder_within(term, beta, topic)) %>%
+      ggplot(aes(beta, term, fill = factor(topic))) +
+      geom_col(show.legend = FALSE) +
+      facet_wrap(~ topic, scales = "free") +
+      scale_y_reordered() +
+      labs(title = paste("Top", n_top_terms, "terms per topic (LDA 1)"))
+  )
+
+  print(
+    top_terms_2 %>%
+      mutate(term = reorder_within(term, beta, topic)) %>%
+      ggplot(aes(beta, term, fill = factor(topic))) +
+      geom_col(show.legend = FALSE) +
+      facet_wrap(~ topic, scales = "free") +
+      scale_y_reordered() +
+      labs(title = paste("Top", n_top_terms, "terms per topic (LDA 2)"))
+  )
+
+  # Estrazione dei documenti principali
+  top_docs_1 <- doc_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma)
+
+  top_docs_2 <- doc_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma)
+
+  # Classificazione dei documenti per topic principale
+  topics_1 <- doc_topics_1 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup()
+
+  topics_2 <- doc_topics_2 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup()
+
+  # Nell'ambiente globale
+  assign(paste0("tot", k, "_topics"), topics_1, envir = .GlobalEnv)
+  assign(paste0("tot", k, "_topics_2"), topics_2, envir = .GlobalEnv)
+
+  # Tabelle di controllo
+  cat("\n========== CLASSIFICAZIONE SENZA PERSONAGGI ==========\n")
+  print(table(substr(topics_1$document, 1, 1), topics_1$topic))
+  cat("\n=========== CLASSIFICAZIONE CON PERSONAGGI ===========\n")
+  print(table(substr(topics_2$document, 1, 1), topics_2$topic))
+
+  # Output dei dati utili
+  list(
+    top_terms_1 = top_terms_1,
+    top_terms_2 = top_terms_2,
+    top_docs_1 = top_docs_1,
+    top_docs_2 = top_docs_2,
+    topics_1 = topics_1,
+    topics_2 = topics_2
+  )
+}
+
+analyze_lda_serie <- function(lda_list_1 = lda_k, lda_list_2 = lda_k2, k, n_top_terms = 50, n_top_docs = 15, serie_nome = "Serie", grafico = T) {
+
+  # Estrazione delle matrici beta e gamma
+  word_topics_1 <- tidy(lda_list_1[[k]], matrix = "beta")
+  doc_topics_1 <- tidy(lda_list_1[[k]], matrix = "gamma")
+
+  word_topics_2 <- tidy(lda_list_2[[k]], matrix = "beta")
+  doc_topics_2 <- tidy(lda_list_2[[k]], matrix = "gamma")
+
+  # Estrazione dei termini principali
+  top_terms_1 <- word_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+
+  top_terms_2 <- word_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+
+  # Grafici con titoli specifici
+  if(grafico){
+    print(
+      top_terms_1 %>%
+        mutate(term = reorder_within(term, beta, topic)) %>%
+        ggplot(aes(beta, term, fill = factor(topic))) +
+        geom_col(show.legend = FALSE) +
+        facet_wrap(~ topic, scales = "free") +
+        scale_y_reordered() +
+        labs(title = paste("Top", n_top_terms, "terms per topic (LDA 1) -", serie_nome))
+    )
+
+    print(
+      top_terms_2 %>%
+        mutate(term = reorder_within(term, beta, topic)) %>%
+        ggplot(aes(beta, term, fill = factor(topic))) +
+        geom_col(show.legend = FALSE) +
+        facet_wrap(~ topic, scales = "free") +
+        scale_y_reordered() +
+        labs(title = paste("Top", n_top_terms, "terms per topic (LDA 2) -", serie_nome))
+    )
+  }
+
+  # Estrazione documenti principali
+  top_docs_1 <- doc_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma)
+
+  top_docs_2 <- doc_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma)
+
+  # Classificazione per topic dominante
+  topics_1 <- doc_topics_1 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup()
+
+  topics_2 <- doc_topics_2 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup()
+
+  # Classificazione per topic dominante
+  topics_1 <- doc_topics_1 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup()
+
+  topics_2 <- doc_topics_2 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup()
+
+  # Nell'ambiente globale
+  assign(paste0("tot", k, "_topics"), topics_1, envir = .GlobalEnv)
+  assign(paste0("tot", k, "_topics_2"), topics_2, envir = .GlobalEnv)
+
+  if(grafico){
+    # Stampa semplice delle frequenze per topic (come table)
+    cat("\n========== NUMEROSITÀ TOPIC -Senza Personaggi ==========\n")
+    print(table(topics_1$topic))
+
+    cat("\n=========== NUMEROSITÀ TOPIC - Con Personaggi ===========\n")
+    print(table(topics_2$topic))
+  }
+
+  # Output utile
+  list(
+    top_terms_1 = top_terms_1,
+    top_terms_2 = top_terms_2,
+    top_docs_1 = top_docs_1,
+    top_docs_2 = top_docs_2,
+    topics_1 = topics_1,
+    topics_2 = topics_2
+  )
+}
+
+analyze_lda_titolati_table <- function(lda_list_1 = lda_k, lda_list_2 = lda_k2, k,
+                                 n_top_terms = 50, n_top_docs = 15,
+                                 custom_titles_1 = NULL, custom_titles_2 = NULL) {
+
+  # Estrazione delle matrici beta e gamma
+  word_topics_1 <- tidy(lda_list_1[[k]], matrix = "beta")
+  doc_topics_1 <- tidy(lda_list_1[[k]], matrix = "gamma")
+
+  word_topics_2 <- tidy(lda_list_2[[k]], matrix = "beta")
+  doc_topics_2 <- tidy(lda_list_2[[k]], matrix = "gamma")
+
+  # Creazione dei titoli personalizzati
+  if (is.null(custom_titles_1)) {
+    custom_titles_1 <- paste("Topic", 1:k)
+  }
+  if (is.null(custom_titles_2)) {
+    custom_titles_2 <- paste("Topic", 1:k)
+  }
+
+  # Verifica che il numero di titoli corrisponda al numero di topic
+  if (length(custom_titles_1) != k) {
+    stop(paste("Il numero di titoli per LDA 1 (", length(custom_titles_1),
+               ") non corrisponde al numero di topic (", k, ")"))
+  }
+  if (length(custom_titles_2) != k) {
+    stop(paste("Il numero di titoli per LDA 2 (", length(custom_titles_2),
+               ") non corrisponde al numero di topic (", k, ")"))
+  }
+
+  # Estrazione dei termini principali
+  top_terms_1 <- word_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta) %>%
+    mutate(topic_title = custom_titles_1[topic])
+
+  top_terms_2 <- word_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta) %>%
+    mutate(topic_title = custom_titles_2[topic])
+
+  # Visualizzazione dei termini principali con titoli personalizzati
+  plot1 <- top_terms_1 %>%
+    mutate(term = reorder_within(term, beta, topic_title)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic_title, scales = "free") +
+    scale_y_reordered() +
+    labs(title = paste("Top", n_top_terms, "terms per topic (LDA 1 - Senza Personaggi)")) +
+    theme(strip.text = element_text(size = 8))
+
+  plot2 <- top_terms_2 %>%
+    mutate(term = reorder_within(term, beta, topic_title)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic_title, scales = "free") +
+    scale_y_reordered() +
+    labs(title = paste("Top", n_top_terms, "terms per topic (LDA 2 - Con Personaggi)")) +
+    theme(strip.text = element_text(size = 8))
+
+  print(plot1)
+  print(plot2)
+
+  # Estrazione dei documenti principali
+  top_docs_1 <- doc_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma) %>%
+    mutate(topic_title = custom_titles_1[topic])
+
+  top_docs_2 <- doc_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma) %>%
+    mutate(topic_title = custom_titles_2[topic])
+
+  # Classificazione dei documenti per topic principale
+  topics_1 <- doc_topics_1 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup() %>%
+    mutate(topic_title = custom_titles_1[topic])
+
+  topics_2 <- doc_topics_2 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup() %>%
+    mutate(topic_title = custom_titles_2[topic])
+
+  # Nell'ambiente globale
+  assign(paste0("tot", k, "_topics"), topics_1, envir = .GlobalEnv)
+  assign(paste0("tot", k, "_topics_2"), topics_2, envir = .GlobalEnv)
+
+  # Tabelle di controllo con titoli
+  # cat("\n\n### Classificazione per topic - LDA 1 (Senza Personaggi)\n\n")
+  tab1 <- as.data.frame.matrix(table(substr(topics_1$document, 1, 1), topics_1$topic_title))
+  tab1 <- tab1[, c(ncol(tab1), 1:(ncol(tab1)-1))]
+  cat(knitr::kable(tab1, caption = "Distribuzione dei documenti per topic - LDA 1 (Senza Personaggi)", format = "html"))
+
+  # cat("\n\n### Classificazione per topic - LDA 2 (Con Personaggi)\n\n")
+  tab2 <- as.data.frame.matrix(table(substr(topics_2$document, 1, 1), topics_2$topic_title))
+  tab2 <- tab2[, c(ncol(tab2), 1:(ncol(tab2)-1))]
+  cat(knitr::kable(tab2, caption = "Distribuzione dei documenti per topic - LDA 2 (Con Personaggi)", format = "html"))
+
+
+  # Output dei dati utili
+  list(
+    top_terms_1 = top_terms_1,
+    top_terms_2 = top_terms_2,
+    top_docs_1 = top_docs_1,
+    top_docs_2 = top_docs_2,
+    topics_1 = topics_1,
+    topics_2 = topics_2,
+    custom_titles_1 = custom_titles_1,
+    custom_titles_2 = custom_titles_2
+  )
+}
+
+analyze_lda_serie_titolati <- function(lda_list_1 = lda_k, lda_list_2 = lda_k2, k,
+                                       n_top_terms = 50, n_top_docs = 15, serie_nome = "Serie",
+                                       custom_titles_1 = NULL, custom_titles_2 = NULL) {
+
+  # Estrazione delle matrici beta e gamma
+  word_topics_1 <- tidy(lda_list_1[[k]], matrix = "beta")
+  doc_topics_1 <- tidy(lda_list_1[[k]], matrix = "gamma")
+
+  word_topics_2 <- tidy(lda_list_2[[k]], matrix = "beta")
+  doc_topics_2 <- tidy(lda_list_2[[k]], matrix = "gamma")
+
+  # Creazione dei titoli personalizzati
+  if (is.null(custom_titles_1)) {
+    custom_titles_1 <- paste("Topic", 1:k)
+  }
+  if (is.null(custom_titles_2)) {
+    custom_titles_2 <- paste("Topic", 1:k)
+  }
+
+  # Verifica che il numero di titoli corrisponda al numero di topic
+  if (length(custom_titles_1) != k) {
+    stop(paste("Il numero di titoli per LDA 1 (", length(custom_titles_1),
+               ") non corrisponde al numero di topic (", k, ")"))
+  }
+  if (length(custom_titles_2) != k) {
+    stop(paste("Il numero di titoli per LDA 2 (", length(custom_titles_2),
+               ") non corrisponde al numero di topic (", k, ")"))
+  }
+
+  # Estrazione dei termini principali
+  top_terms_1 <- word_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta) %>%
+    mutate(topic_title = custom_titles_1[topic])
+
+  top_terms_2 <- word_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(beta, n = n_top_terms) %>%
+    ungroup() %>%
+    arrange(topic, -beta) %>%
+    mutate(topic_title = custom_titles_2[topic])
+
+  # Grafici con titoli personalizzati
+  plot1 <- top_terms_1 %>%
+    mutate(term = reorder_within(term, beta, topic_title)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic_title, scales = "free") +
+    scale_y_reordered() +
+    labs(title = paste("Top", n_top_terms, "terms per topic (LDA 1 - Senza Personaggi) -", serie_nome)) +
+    theme(strip.text = element_text(size = 8))
+
+  plot2 <- top_terms_2 %>%
+    mutate(term = reorder_within(term, beta, topic_title)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic_title, scales = "free") +
+    scale_y_reordered() +
+    labs(title = paste("Top", n_top_terms, "terms per topic (LDA 2 - Con Personaggi) -", serie_nome)) +
+    theme(strip.text = element_text(size = 8))
+
+  print(plot1)
+  print(plot2)
+
+  # Estrazione documenti principali
+  top_docs_1 <- doc_topics_1 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma) %>%
+    mutate(topic_title = custom_titles_1[topic])
+
+  top_docs_2 <- doc_topics_2 %>%
+    group_by(topic) %>%
+    slice_max(gamma, n = n_top_docs) %>%
+    ungroup() %>%
+    arrange(topic, -gamma) %>%
+    mutate(topic_title = custom_titles_2[topic])
+
+  # Classificazione per topic dominante
+  topics_1 <- doc_topics_1 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup() %>%
+    mutate(topic_title = custom_titles_1[topic])
+
+  topics_2 <- doc_topics_2 %>%
+    group_by(document) %>%
+    slice_max(gamma, n = 1) %>%
+    ungroup() %>%
+    mutate(topic_title = custom_titles_2[topic])
+
+  # Nell'ambiente globale
+  assign(paste0("tot", k, "_topics"), topics_1, envir = .GlobalEnv)
+  assign(paste0("tot", k, "_topics_2"), topics_2, envir = .GlobalEnv)
+
+  # Creazione delle tabelle con titoli personalizzati
+  table_1 <- topics_1$topic_title
+  names(table_1) <- topics_1$topic_title
+  table_1 <- table(table_1)
+
+  table_2 <- topics_2$topic_title
+  names(table_2) <- topics_2$topic_title
+  table_2 <- table(table_2)
+
+  # Output utile
+  list(
+    top_terms_1 = top_terms_1,
+    top_terms_2 = top_terms_2,
+    top_docs_1 = top_docs_1,
+    top_docs_2 = top_docs_2,
+    topics_1 = topics_1,
+    topics_2 = topics_2,
+    custom_titles_1 = custom_titles_1,
+    custom_titles_2 = custom_titles_2
+  )
+}
+```
+
+
+## *Text Mining*
+
+### Analisi delle frequenze ne *I Simpson*
+
+Partendo dalle frequenze calcolate tramite la funzione `elabora_testo` (si veda l’Appendice D: Definizione Funzioni), è possibile esplorare il lessico più utilizzato. L’analisi si concentra inizialmente sulla distribuzione generale delle frequenze, per poi isolare i termini meno informativi — come parole troppo corte — e concludersi con l'identificazione dei termini più ricorrenti. La prima sezione è riservata a *I Simpson* e la seconda a *I Griffin*.
+
+Il *boxplot* delle frequenze de *I Simpson* mostra una distribuzione fortemente asimmetrica, con media intorno a 500. Tuttavia, alcuni termini superano di molto questo valore, posizionandosi come *outlier* sopra quota 1500. Questo *pattern* riflette una legge nota nel linguaggio naturale, ossia la Legge di Zipf, secondo cui poche parole vengono ripetute molto spesso mentre la maggioranza appare solo raramente.
+
+```{r tm s}
+frequenze_simpson %>% select(n) %>% boxplot(main = "Boxplot Frequenze")
+```
+
+Successivamente, si indagano le parole più frequenti in termini assoluti. Questo permette di comprendere quali termini dominano il vocabolario della serie, prima della rimozione manuale di alcune parole poco significative.
+
+```{r }
+# Parole con frequenza > 1000
+frequenze_simpson %>%
+  filter(n > 1000) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Parole con frequenza > 1000", x = NULL, y = "Frequenza") +
+  theme(axis.text.y = element_text(size = 8))
+
+```
+
+I seguenti grafici mostrano le frequenze assolute delle parole con due o tre caratteri, con l'intento di individuare parole poco informative o addirittura vuote di significato.
+
+```{r}
+# Parole di due lettere (si tengono solo tv e dr)
+frequenze_simpson %>%
+  filter(nchar(word) == 2) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "darkgreen") +
+  coord_flip() +
+  labs(title = "Parole di 2 lettere", x = NULL, y = "Frequenza")
+```
+
+```{r}
+# Parole di tre lettere (identifica rumori da rimuovere)
+frequenze_simpson %>%
+  filter(nchar(word) == 3) %>%
+  filter(n > 1000) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "darkred") +
+  coord_flip() +
+  labs(title = "Parole di 3 lettere", x = NULL, y = "Frequenza")
+```
+
+Sulla base di queste osservazioni, si procede con la rimozione definitiva di termini troppo brevi o ripetitivi, ad eccezione di quelli ritenuti significativi nel contesto della serie (quali "tv" e "dr").
+
+```{r}
+# Rimozione parole troppo corte o inutili
+frequenze_simpson <- frequenze_simpson %>%
+  filter(nchar(word) > 2 | word %in% c("tv", "dr"))
+```
+
+Infine, vengono riportati l'istogramma e il *wordcloud* delle parole più frequenti, in cui le prime cinque, non sorprendentemente, sono: "*dad*", "*love*", "*kid*", "*boy*" e "*day*".
+
+```{r}
+# Parole con frequenza > 1200
+frequenze_simpson %>%
+  filter(n > 1200) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "orange") +
+  coord_flip() +
+  labs(title = "Parole con frequenza > 1200", x = NULL, y = "Frequenza")
+```
+
+```{r wordcloud s}
+# Wordcloud per le 60 parole più frequenti nei Simpson
+frequenze_simpson %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 60) %>%
+  ggplot(aes(label = word, size = n, color = n)) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  geom_text_wordcloud_area() +
+  scale_size_area(max_size = 15) +
+  labs(title = "Wordcloud parole più frequenti - Simpson") +
+  theme_minimal()
+
+```
+
+
+### Analisi degli n-grammi ne *I Simpson* con *stopwords*
+
+Si estraggono e contano le occorrenze di bigrammi, trigrammi e quadrigrammi. Poi si mostrano le dieci combinazioni più comuni per ciascun n-gramma. Sono state trovate strutture sintattiche frequenti, come forme verbali, incorrette a causa della lemmatizzazione, e che riflettono un linguaggio quotidiano e informale. Si osservano numerosi n-grammi che iniziano con "I", evidenziando una forte presenza di dialoghi in prima persona, coerente con la struttura di uno *show* basato su interazioni familiari e personali.
+
+```{r n-grammi s}
+# Bigrammi più frequenti
+bigrammi_simpson <- simpson %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 2) %>%
+  count(ngram, sort = TRUE)
+head(bigrammi_simpson, 10)
+
+# Trigrammi più frequenti
+trigrammi_simpson <- simpson %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 3) %>%
+  count(ngram, sort = TRUE)
+head(trigrammi_simpson, 10)
+
+# Quadrigrammi più frequenti
+quadrigrammi_simpson <- simpson %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 4) %>%
+  count(ngram, sort = TRUE)
+head(quadrigrammi_simpson, 10)
+
+rm(bigrammi_simpson, trigrammi_simpson, quadrigrammi_simpson)
+```
+
+### Analisi delle frequenze ne *I Griffin*
+Come ne *I Simpson*, si nota che la distribuzione delle frequenze è asimmetrica a destra.
+
+```{r tm g}
+## Analisi griffin
+# Statistiche di base
+frequenze_griffin %>% select(n) %>% boxplot(main = "Boxplot Frequenze Assolute Griffin")
+```
+
+E' presente un *outlier* che compare oltre le 4000 volte ("guy") e che viene rimosso, in quanto non informativo.
+
+```{r}
+# Parole con frequenza > 1000
+frequenze_griffin %>%
+  filter(n > 1000) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Parole con frequenza > 1000 (Griffin)", x = NULL, y = "Frequenza")
+
+# Rimozione outlier sopra soglia
+frequenze_griffin <- frequenze_griffin %>%
+  filter(n < 2000)
+```
+
+Di seguito si individuano parole poco informative o rumori, analizzando le parole di due o tre lettere. Vengono rimosse le parole con due caratteri, di nuovo ad eccezione di "tv" e "dr".
+
+```{r}
+# Parole di due lettere
+frequenze_griffin %>%
+  filter(nchar(word) == 2) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "darkgreen") +
+  coord_flip() +
+  labs(title = "Parole di 2 lettere (Griffin)", x = NULL, y = "Frequenza")
+
+# Parole di tre lettere
+frequenze_griffin %>%
+  filter(nchar(word) == 3) %>%
+  filter(n > 300) %>% 
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "darkred") +
+  coord_flip() +
+  labs(title = "Parole di 3 lettere (Griffin)", x = NULL, y = "Frequenza")
+
+# Rimozione parole brevi o inutili
+frequenze_griffin <- frequenze_griffin %>%
+  filter(nchar(word) > 2 | word %in% c("tv", "dr"))
+```
+
+Infine, vengono riportati l'istogramma e il *wordcloud* delle parole più frequenti, in cui le prime cinque sono: "love", "talk", "day", "wait" e "kid".
+
+```{r}
+# Parole con frequenza > 900
+frequenze_griffin %>%
+  filter(n > 900) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(fill = "orange") +
+  coord_flip() +
+  labs(title = "Parole con frequenza > 900 (Griffin)", x = NULL, y = "Frequenza")
+```
+
+```{r}
+# Wordcloud per le 60 parole più frequenti nei Griffin
+frequenze_griffin %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 60) %>%
+  ggplot(aes(label = word, size = n, color = n)) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  geom_text_wordcloud_area() +
+  scale_size_area(max_size = 15) +
+  labs(title = "Wordcloud parole più frequenti - Griffin") +
+  theme_minimal()
+```
+
+
+### Analisi degli n-grammi ne *I Griffin* con *stopwords*
+
+Si estraggono e contano le presenze di bigrammi, trigrammi e quadrigrammi. Poi si mostrano le dieci combinazioni più comuni per ciascun n-gramma. Come ne *I Simpson*, si denota un parlato fortemente colloquiale e un lessico molto centrato sull'azione e lo stato (si notino i verbi "essere", "fare"..). Molti n-grammi ruotano intorno alla prima persona singolare. In aggiunta rispetto a *I Simpson*, sono presenti espressioni come "what the hell", "oh my god" e "get out of here", molto emotive ed enfatiche.
+
+```{r bigrammi g}
+# Bigrammi più frequenti
+bigrammi_griffin <- griffin %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 2) %>%
+  count(ngram, sort = TRUE)
+head(bigrammi_griffin, 10)
+```
+
+```{r trigrammi g}
+# Trigrammi più frequenti
+trigrammi_griffin <- griffin %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 3) %>%
+  count(ngram, sort = TRUE)
+head(trigrammi_griffin, 10)
+```
+
+```{r quadrigrammi g}
+# Quadrigrammi più frequenti
+quadrigrammi_griffin <- griffin %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 4) %>%
+  count(ngram, sort = TRUE)
+head(quadrigrammi_griffin, 10)
+
+rm(bigrammi_griffin, trigrammi_griffin, quadrigrammi_griffin)
+```
+
+### Analisi degli n-grammi senza *stopwords*
+
+Rimuovendo le *stopwords*, non si trovano bigrammi e trigrammi rilevanti. Questa osservazione giustifica la scelta di non unirli in un unico *token*.
+Si può notare come vi siano spesso ripetizioni della stessa parola, interiezioni ed onomatopee. Queste ripetizioni sono tipiche di linguaggio parlato e *script* animati, dove il ritmo e l’espressività vocale sono fondamentali.
+
+```{r ngrammi senza stopwords}
+# n- grammi senza stopwords simpson
+# Bigrammi 
+# Simpson
+bigrammi_simpson_sw <- simpson %>%
+  select(testo) %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 2) %>%
+  separate(ngram, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word, !word2 %in% stop_words$word) %>%
+  unite(ngram, word1, word2, sep = " ") %>%
+  count(ngram, sort = TRUE)
+bigrammi_simpson_sw %>% print(n = 15)
+
+# Griffin
+bigrammi_griffin_sw <- griffin %>%
+  select(testo) %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 2) %>%
+  separate(ngram, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word, !word2 %in% stop_words$word) %>%
+  unite(ngram, word1, word2, sep = " ") %>%
+  count(ngram, sort = TRUE)
+bigrammi_griffin_sw %>% print(n = 15)
+
+# Trigrammi
+# Simpson 
+trigrammi_simpson_sw <- simpson %>%
+  select(testo) %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 3) %>%
+  separate(ngram, into = c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word, !word2 %in% stop_words$word, !word3 %in% stop_words$word) %>%
+  unite(ngram, word1, word2, word3, sep = " ") %>%
+  count(ngram, sort = TRUE)
+trigrammi_simpson_sw %>% print(n = 15)
+
+# Griffin
+trigrammi_griffin_sw <- griffin %>%
+  select(testo) %>%
+  unnest_tokens(ngram, testo, token = "ngrams", n = 3) %>%
+  separate(ngram, into = c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word, !word2 %in% stop_words$word, !word3 %in% stop_words$word) %>%
+  unite(ngram, word1, word2, word3, sep = " ") %>%
+  count(ngram, sort = TRUE)
+trigrammi_griffin_sw %>% print(n = 15)
+
+rm(bigrammi_simpson_sw, trigrammi_simpson_sw, bigrammi_griffin_sw, trigrammi_griffin_sw)
+
+```
+
+### Analisi comparativa
+
+Sono stati confrontati i termini condivisi fra le due serie, ponendo attenzione sulle loro frequenze relative (calcolate rispetto al totale delle parole per ciascun *corpus*), per tenere conto della differenza del numero dei documenti tra i due *corpus.* Sono stati usati i dati senza i nomi dei personaggi, per generare dei risultati informativi e non triviali.
+
+Si selezionano in `words_compare_f` le 100 parole più frequenti in entrambi i *set*, ordinandole sulla base della somma delle frequenze relative. 
+```{r grafico comparativo}
+# Rinomina colonne per evitare conflitti
+frequenze_simpson <- frequenze_simpson %>% rename(freq_simpson = n)
+frequenze_griffin <- frequenze_griffin %>% rename(freq_griffin = n)
+
+# Inner join sulle parole comuni
+words_compare <- inner_join(frequenze_simpson, frequenze_griffin, by = "word")
+
+# Funzioni per normalizzare le frequenze relative 
+normalize_simpson <- function(x) (x/sum(frequenze_simpson$freq_simpson))
+
+normalize_griffin <- function(x) (x/sum(frequenze_griffin$freq_griffin))
+
+# Applica la normalizzazione ai dati uniti
+words_compare_n <- words_compare %>%
+  mutate(
+    freq_simpson = normalize_simpson(freq_simpson),
+    freq_griffin = normalize_griffin(freq_griffin)
+  )
+words_compare_n %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  slice_head(n = 20)
+
+# Top 100 parole più frequenti in entrambi
+words_compare_f <- words_compare_n %>% 
+  mutate(total = freq_simpson + freq_griffin) %>% 
+  slice_max(order_by = total, n = 100)
+
+
+
+```
+
+Il grafico mostra la distribuzione delle parole su scala logaritmica. Ogni punto rappresenta una parola, posizionata in base alla sua frequenza relativa ne *I Simpson* (asse x) e ne *I Griffin* (asse y). Di conseguenza, le parole al di sopra la linea rossa sono più usate ne *I Griffin*, quelle al di sotto, ne *I Simpson*. Le parole "dad", "love" e "kid" sono fortemente usate in entrambi gli *show*, ma in particolare ne *I Simpson*. "Hell" e "damn" compaiono molto più spesso ne *I Griffin* rispetto a *I Simpson*, ad evidenziare il carattere più trasgressivo della serie.
+
+```{r grafico comparativo 2}
+# Grafico: scala logaritmica su tutte le parole
+ggplot(words_compare_f, aes(x = freq_simpson, y = freq_griffin, label = word)) +
+  geom_point(alpha = 0.7, color = "steelblue") +
+  geom_text(check_overlap = TRUE, hjust = 0, vjust = 1, size = 3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  scale_x_log10() +  # scala logaritmica asse x
+  scale_y_log10() +  # scala logaritmica asse y
+  labs(
+    title = "Frequenze logaritmiche delle parole comuni",
+    x = "Frequenza relativa ne I Simpson (log scale)",
+    y = "Frequenza relativa ne I Griffin (log scale)"
+  ) +
+  theme_minimal()
+
+
+#rm(words_compare, words_compare_f, words_compare_n, normalize)
+
+```
+
+L'analisi comparativa delle parole più frequenti tra le due serie è stata estesa tramite la libreria `quanteda`, che consente di identificare i termini più caratteristici di ciascuna serie.
+
+Dopo aver unito i due *dataset* e costruito un *corpus*, si è proceduto alla *tokenizzazione* dei testi e alla creazione della *document-feature matrix* (DFM).
+
+È stata calcolata la *keyness*, una misura basata sul test del chi-quadro, che quantifica quanto la frequenza osservata di un termine in un gruppo differisce da quella attesa rispetto a un gruppo di riferimento. In questo caso, il gruppo target è il corpus de *I Griffin*, quindi valori positivi indicano parole più rappresentative di questa serie, mentre valori negativi segnalano termini distintivi de *I Simpson*.
+Questo approccio consente di andare oltre le frequenze assolute, evidenziando differenze linguistiche e stilistiche rilevanti tra le due sitcom.
+```{r quanteda}
+# Aggiunge la colonna della serie
+griffin_clean$serie <- "Griffin"
+simpson_clean$serie <- "Simpson"
+
+# Unisce i due dataset
+corpus_data <- bind_rows(griffin_clean, simpson_clean)
+
+# Crea un corpus quanteda
+corp <- corpus(corpus_data, text_field = "testo")
+
+# Tokenizza (i testi sono già lemmatizzati e puliti, quindi niente stopwords o stemming)
+toks <- quanteda::tokens(corp)
+
+# Crea la document-feature matrix (DFM)
+dfm_all <- dfm(toks)
+
+# Raggruppa per serie
+dfm_grouped <- dfm_group(dfm_all, groups = docvars(dfm_all, "serie"))
+
+# Calcola la keyness
+result_keyness <- textstat_keyness(dfm_grouped, target = "Griffin")
+
+# Visualizza i primi risultati
+head(result_keyness, 10)
+tail(result_keyness, 10)
+
+```
+
+Nel grafico a barre sottostante vengono mostrate le 12 parole con i valori di chi-quadro più elevati a favore de *I Griffin* (blu) e le 12 più distintive a favore de *I Simpson* (giallo). L’asse x mostra la forza dell’associazione (valore della statistica test), mentre il colore distingue la serie di appartenenza.
+
+Le parole con *keyness* più alta sono "guy", già rimossa nelle frequenze in quanto non rilevante, e "Quahog", la città dove sono ambientati *I Griffin*. 
+Oltre a queste, i termini distintivi de *I Griffin* risultano più volgari e provocatori, coerenti con il tono irriverente dello *show*. Al contrario, le parole più tipiche de *I Simpson* sono generalmente più neutre o comuni, riflettendo un linguaggio più accessibile e adatto a un pubblico familiare. Questo risultato conferma empiricamente le differenze percepite tra le due serie.
+
+```{r quanteda 2}
+# Seleziona le n parole più distintive per ciascun gruppo, per il grafico
+n <- 12
+{
+  top_griffin <- result_keyness %>% filter(chi2 > 0) %>% slice_max(chi2, n = n)
+  top_simpson <- result_keyness %>% filter(chi2 < 0) %>% slice_min(chi2, n = n)
+
+  # Unisci i due insiemi
+  top_words <- bind_rows(top_griffin, top_simpson)
+
+  # Crea la variabile gruppo per colorare le barre
+  top_words <- top_words %>%
+    mutate(group = ifelse(chi2 > 0, "Griffin", "Simpson"))
+
+  # Ordina i termini per plotting
+  top_words <- top_words %>%
+    mutate(feature = reorder(feature, chi2))
+}
+
+# Plot con ggplot2
+ggplot(top_words, aes(x = feature, y = chi2, fill = group)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  labs(title = "Parole più distintive: Griffin vs Simpson",
+       x = "Parola",
+       y = "Valore Chi²",
+       fill = "Serie") +
+  scale_fill_manual(values = c("Griffin" = "#1E90FF", "Simpson" = "#FFD700")) +
+  theme_minimal()
+
+```
+
+### Parole più frequenti per stagione
+
+Sono state confrontate le frequenze delle parole al variare delle stagioni di ogni serie, al fine di osservare come l'utilizzo del linguaggio (e la menzione dei personaggi) cambi nel tempo. Da notare che ora viene usato il *dataset* che comprende i nomi dei personaggi, che nel confronto fra stagioni può mostrare risultati interessanti.
+
+Il grafico mostra, su scala logaritmica, le frequenze relative della stagione 1 (asse x) e stagione 36 (asse y), ossia la prima e l'ultima, de *I Simpson*. Le parole sulla diagonale sono rimaste invariate tra le due stagioni, quelle al di sopra di essa sono più frequenti nella stagione 36 e quelle al di sotto nella prima.
+
+Nella prima stagione vengono menzionati più spesso i nomi dei personaggi principali, mentre nell'ultima spiccano, tra le altre: "ned", "god" e "hate".
+
+```{r s1 e s36}
+# Parole più frequenti per stagione
+# Calcolo frequenze relative per parola e stagione
+frequenze_rel_simpson <- simpson_clean_2 %>%
+  unnest_tokens(word, testo) %>%
+  count(stagione, word) %>%
+  group_by(stagione) %>%
+  mutate(freq_rel = n / sum(n)) %>%
+  ungroup()
+
+# Seleziona parole comuni tra stagione 1 e stagione 36
+words_compare_simpson <- inner_join(
+  frequenze_rel_simpson %>% filter(stagione == 1),
+  frequenze_rel_simpson %>% filter(stagione == 36),
+  by = "word",
+  suffix = c(".1", ".36")
+)
+
+# Grafico log-log con frequenze relative tra stagione 1 e stagione 36
+ggplot(words_compare_simpson, aes(x = freq_rel.1, y = freq_rel.36, label = word)) +
+  geom_point(alpha = 0.7, color = "steelblue") +
+  geom_text(check_overlap = TRUE, hjust = 0, vjust = 1, size = 3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  scale_x_log10(limits=c(0.0001,0.05)) +
+  scale_y_log10(limits=c(0.0001,0.05)) +
+  labs(
+    title = "Confronto frequenze relative: Simpson S1 vs S36",
+    x = "Frequenza relativa ne I Simpson S1 (log scale)",
+    y = "Frequenza relativa ne I Simpson S36 (log scale)"
+  ) +
+  theme_minimal()
+
+```
+
+Eseguendo la stessa analisi per stagioni contigue (decima e undicesima), si osservano variazioni linguistiche più contenute rispetto a quelle riscontrate nel confronto tra la prima e l'ultima stagione. Difatti, il grafico mostra che le frequenze delle parole risultano maggiormente concentrate lungo la diagonale.
+
+```{r s10 e s11}
+# Seleziona parole comuni tra stagione 10 e stagione 11
+words_compare_simpson_2 <- inner_join(
+  frequenze_rel_simpson %>% filter(stagione == 10),
+  frequenze_rel_simpson %>% filter(stagione == 11),
+  by = "word",
+  suffix = c(".10", ".11")
+)
+
+# Grafico log-log con frequenze relative tra stagioni 10 e 11
+ggplot(words_compare_simpson_2, aes(x = freq_rel.10, y = freq_rel.11, label = word)) +
+  geom_point(alpha = 0.7, color = "steelblue") +
+  geom_text(check_overlap = TRUE, hjust = 0, vjust = 1, size = 3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  scale_x_log10(limits=c(0.0001,0.05)) +
+  scale_y_log10(limits=c(0.0001,0.05)) +
+  labs(
+    title = "Confronto frequenze relative: Simpson S10 vs S11",
+    x = "Frequenza relativa ne I Simpson S10 (log scale)",
+    y = "Frequenza relativa ne I Simpson S11 (log scale)"
+  ) +
+  theme_minimal()
+```
+
+È stata ripetuta la medesima analisi per *I Griffin*, ma non si evidenziano differenze rilevanti tra la prima e l'ultima stagione.
+
+```{r s1 e s23 g}
+# Griffin
+# Calcolo frequenze relative per parola e stagione
+frequenze_rel_griffin <- griffin_clean_2 %>%
+  unnest_tokens(word, testo) %>%
+  count(stagione, word) %>%
+  group_by(stagione) %>%
+  mutate(freq_rel = n / sum(n)) %>%
+  ungroup()
+
+# Seleziona parole comuni tra stagione 1 e stagione 23
+words_compare_griffin <- inner_join(
+  frequenze_rel_griffin %>% filter(stagione == 1),
+  frequenze_rel_griffin %>% filter(stagione == 23),
+  by = "word",
+  suffix = c(".1", ".23")
+)
+
+# Grafico log-log con frequenze relative
+ggplot(words_compare_griffin, aes(x = freq_rel.1, y = freq_rel.23, label = word)) +
+  geom_point(alpha = 0.7, color = "steelblue") +
+  geom_text(check_overlap = TRUE, hjust = 0, vjust = 1, size = 3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  scale_x_log10(limits=c(0.0001,0.05)) +
+  scale_y_log10(limits=c(0.0001,0.05)) +
+  labs(
+    title = "Confronto frequenze relative: Griffin S1 vs S23",
+    x = "Frequenza relativa ne I Griffin S1 (log scale)",
+    y = "Frequenza relativa ne I Griffin S23(log scale)"
+  ) +
+  theme_minimal()
+
+
+rm(words_compare_griffin, top_words_griffin)
+```
+
+Come per *I Simpson*, l'analisi su due stagioni consecutive (anche qui, 10 e 11) mostra parole più concentrare sulla diagonale.
+
+```{r s10 e s11 g}
+
+# Seleziona parole comuni tra stagione 10 e stagione 11
+words_compare_griffin_2 <- inner_join(
+  frequenze_rel_griffin %>% filter(stagione == 10),
+  frequenze_rel_griffin %>% filter(stagione == 11),
+  by = "word",
+  suffix = c(".10", ".11")
+)
+
+# Grafico log-log con frequenze relative 
+ggplot(words_compare_griffin_2, aes(x = freq_rel.10, y = freq_rel.11, label = word)) +
+  geom_point(alpha = 0.7, color = "steelblue") +
+  geom_text(check_overlap = TRUE, hjust = 0, vjust = 1, size = 3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  scale_x_log10(limits=c(0.0001,0.05)) +
+  scale_y_log10(limits=c(0.0001,0.05)) +
+  labs(
+    title = "Confronto frequenze relative: Griffin S10 vs S11",
+    x = "Frequenza relativa ne I Griffin S10 (log scale)",
+    y = "Frequenza relativa ne I Griffin S11 (log scale)"
+  ) +
+  theme_minimal()
+
+
+```
+
+Il seguente grafico confronta la frequenza relativa delle menzioni dei personaggi al variare di tutte le stagioni. È emerso che Bart viene nominato molto frequentemente nelle prime stagioni, soprattutto nella prima, e meno dalla decima in poi. Questo andamento riflette quanto dichiarato dallo stesso Matt Groening, il quale inizialmente aveva concepito Bart come protagonista della serie, per poi spostare gradualmente l’attenzione su Homer, che è il più presente in ogni stagione. Maggie è il membro della famiglia meno nominato. Moe e Mr. Burns sembrano apparire in modo erratico, senza un vero *pattern* temporale. Itchy (di "Grattachecca e Fichetto") è nominato di più nelle prime stagioni e non compare affatto in alcune di esse.
+
+```{r heatmap s}
+# Lista dei personaggi di interesse
+simpson_heatmap <- c("homer", "bart", "marge", "lisa", "maggie", 
+                "moe", "milhouse", "krusty", "mrburns", "patty", "itchy")
+
+# Filtra solo le parole corrispondenti ai personaggi
+heatmap_simpson_personaggi <- frequenze_rel_simpson %>%
+  filter(word %in% simpson_heatmap)
+
+# Crea la heatmap
+ggplot(heatmap_simpson_personaggi, aes(x = word, y = factor(stagione), fill = freq_rel)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "#FFD700", name = "Frequenza relativa") +
+  labs(
+    title = "Presenza relativa dei personaggi ne I Simpson (per stagione)",
+    x = "Personaggio",
+    y = "Stagione"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Ne *I Griffin*, Peter è il personaggio più presente e stabile in tutte le stagioni, con particolare intensità nelle prime seguita da una leggera diminuzione negli ultimi anni. Stewie mostra un aumento nelle ultime stagioni; Brian e Lois al contrario sono più nominati nelle prime. Interessante l'andamento delle menzioni della città di Cleveland, che sembra diminuire intorno alle stagioni 9-11, lo stesso periodo in cui è stato creato il suo *show* indipendente "The Cleveland Show" (2009-2013).
+
+```{r heatmap g}
+# Lista dei personaggi di interesse
+griffin_heatmap <- c("peter","meg","brian","lois","stewie","chris","quagmire","cleveland","joe")
+
+# Filtra solo le parole corrispondenti ai personaggi
+heatmap_griffin_personaggi <- frequenze_rel_griffin %>%
+  filter(word %in% griffin_heatmap)
+
+# Crea la heatmap
+ggplot(heatmap_griffin_personaggi, aes(x = word, y = factor(stagione), fill = freq_rel)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "#1E90FF", name = "Frequenza relativa") +
+  labs(
+    title = "Presenza relativa dei personaggi ne I Griffin (per stagione)",
+    x = "Personaggio",
+    y = "Stagione"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+```
+
+
+
+###  Associazioni
+Per studiare le associazioni tra parole è necessario disporre di una *Document-Term Matrix*, in cui ogni riga corrisponde a un episodio e ogni colonna a un termine, con il valore che indica la frequenza del termine nel documento.
+
+In questo passaggio vengono create le DTM per entrambe le serie, sia nella versione completa (in cui sono presenti anche i nomi dei personaggi), sia in quella epurata dai nomi propri. Per alleggerire la lettura, la funzione `create_dtm()` è riportata in Appendice D.
+```{r}
+# Creazione DTM
+#senza personaggi
+dtm_s_all <- create_dtm(simpson_clean, stop_words$word, 'S')
+dtm_g_all <- create_dtm(griffin_clean, stop_words$word, 'G')
+
+#con personaggi
+dtm_s     <- create_dtm(simpson_clean_2, c(stop_words$word, stopwords_nostre), 'S') 
+dtm_g     <- create_dtm(griffin_clean_2, c(stop_words$word, stopwords_nostre), 'G')
+```
+
+Viene utilizzata la funzione `findAssocs` per identificare co-occorrenze notevoli tra i vari termini, con diverse soglie di correlazione (0.3 e 0.2). Si può notare chiaramente che le associazioni più rilevanti per il termine "beer" ne *I Griffin* fanno riferimento a personaggi appartenenti a *I Simpson* ("Smithers", "Nelson", "Sprigfield"...); questo perché c'è un episodio in particolare (S13 Ep01), il cui titolo è "E alla fine si incontrano", dove si riuniscono le famiglie di entrambe le serie.
+
+```{r message=TRUE, warning=TRUE}
+
+# Cerca associazioni
+#SIMPSON
+findAssocs(dtm_s_all, "beer", 0.3) 
+findAssocs(dtm_s, "beer", 0.3)
+findAssocs(dtm_s_all, "homer", 0.3)
+#GRIFFIN
+findAssocs(dtm_g_all, "beer", 0.2) 
+findAssocs(dtm_g, "beer", 0.2)
+findAssocs(dtm_g_all, "peter", 0.3)
+
+```
+
+Ad ogni modo, un'analisi delle associazioni tramite `findAssocs` non è opportuna in questa situazione: difatti, la ricerca delle associazioni si svolge all'interno del medesimo documento. Ma la co-occorrenza di due parole nello stesso episodio non implica un legame stretto tra di esse, a causa della vastità di parole e temi che possono caratterizzare un singolo episodio. Viene quindi scritta una funzione al fine di segmentare il testo: i "documenti" diventano ora delle finestre mobili di 80 parole, che scorrono il testo con passo di 40 parole. Si è cercato, con questa procedura, di rendere più "locale" la ricerca delle associazioni, e quindi meno spuria la natura delle stesse. Va da sé che parametri diversi per la segmentazione del testo portano a risultati differenti, ma si è provato ad identificare, tramite *trial-and-error*, dei valori che portassero a conclusioni apprezzabili. Successivamente viene costruita una DTM basata sui nuovi documenti, ovvero i segmenti. Infine, si definisce un vettore di parole per ogni serie, sui quali cui può essere interessante ricercare le associazioni.
+
+```{r}
+
+# Segmentazione del testo in finestre sovrapposte (sliding window)
+segmenta_testo_sliding <- function(testo, finestra = 80, passo = 40) {
+  parole <- unlist(tokenize_words(testo))
+  n <- length(parole)
+  # Crea segmenti di 'finestra' parole, facendo scorrere la finestra di 'passo' parole alla volta
+  segmenti <- lapply(seq(1, n - finestra + 1, by = passo), function(i) {
+    paste(parole[i:(i + finestra - 1)], collapse = " ")
+  })
+  return(segmenti)
+}
+
+# Segmentazione e creazione DTM
+crea_dtm_segmenti <- function(df) {
+  df_seg <- df %>%
+    # Rimuove numeri
+    mutate(testo = str_remove_all(testo, "\\d+")) %>%  
+    # Applica la segmentazione per ogni riga (episodio)
+    rowwise() %>% 
+    mutate(segmenti = list(segmenta_testo_sliding(testo))) %>%
+    # Espande la lista di segmenti: una riga per ogni segmento
+    unnest(segmenti) %>%
+    mutate(segmento_id = row_number()) %>%
+    ungroup()
+  # Crea un corpus di testi a partire dai segmenti
+  corpus <- VCorpus(VectorSource(df_seg$segmenti))
+  rm(df_seg)
+  gc()
+  return(DocumentTermMatrix(corpus))
+}
+
+# DTM segmentato per cercare associazioni
+dtm_s_s <- crea_dtm_segmenti(simpson_clean_2)
+dtm_g_s <- crea_dtm_segmenti(griffin_clean_2)
+
+# Lista di parole interessanti
+specifiche_s <- c(
+  "homer", "bart", "marge", "lisa", "mr", "moe", "ned", "krusty", "milhouse",
+  "apu", "wiggum", "skinner", "flanders", "smithers", "maggie", "patty",
+  "selma", "grandpa", "springfield", "kwik", "plant", "tavern", "duff",
+  "krustyburger", "leftorium", "donut", "doh", "excellent", "hidely-ho",
+  "nuclear", "mayor", "church"
+)
+
+specifiche_g <- c(
+  "peter", "lois", "stewie", "brian", "quagmire", "cleveland", "meg", "chris",
+  "chicken", "fight", "flashback", "cutaway", "television", "death", "dog",
+  "baby", "alcohol", "joe"
+)
+
+generiche <- c(
+  "school", "job", "work", "family", "money", "love", "problem", "beer", "hate",
+  "funny", "stupid", "crazy", "help", "home", "bar", "election", "environment",
+  "holiday", "halloween", "drink", "eat", "sleep", "dream", "argue", "laugh",
+  "friend", "neighbor", "boss", "student", "teacher", "marriage", "parent",
+  "child", "brother", "sister", "enemy", "competition", "angry", "happy", "sad",
+  "jealous", "proud", "embarrassed", "smart", "dumb", "genius", "success",
+  "failure", "god", "tv", "show", "italy", "plan", "joke", "memory", "battle",
+  "friendship", "kill", "sex"
+)
+
+parole_interessanti_s <- c(specifiche_s, generiche)
+parole_interessanti_g <- c(specifiche_g, generiche)
+
+```
+
+Viene poi implementata una funzione per automatizzare la ricerca delle associazioni tra parole nelle DTM dei segmenti. In questo caso il risultato più interessante sembra essere l'associazione tra i termini "gay" e "marriage" ne *I Griffin*; gli altri risultati sembrano nuovamente abbastanza scontati se non superflui. È quantomeno simpatica l'associazione tra "drink" e "liver" ne *I Griffin*; infine, l'associazione tra "dove" e "boss" è dovuta alla singola comparsa della parola "dove" in un contesto lavorativo, e la si può ritenere un'associazione non degna di interesse.
+
+```{r}
+# Trova associazioni con soglia minima
+trova_associazioni <- function(dtm, parole, corlimit = 0.25) {
+  assoc_list <- list()
+  # Cicla su tutte le parole di interesse
+  for (i in seq_along(parole)) {
+    parola <- parole[i]
+    # cat(sprintf("'%s', parola %d/%d \n", parola, i, length(parole)))
+    if (parola %in% Terms(dtm)) {
+      assoc <- findAssocs(dtm, parola, corlimit)
+      # Se sono state trovate associazioni, le aggiunge alla lista
+      if (length(assoc[[1]]) > 0) assoc_list[[parola]] <- assoc[[1]]
+    }
+  }
+  return(assoc_list)
+}
+
+#Estrai le associazioni interessanti
+associazioni_s <- trova_associazioni(dtm_s_s, parole_interessanti_s, corlimit = 0.25)
+associazioni_g <- trova_associazioni(dtm_g_s, parole_interessanti_g, corlimit = 0.25)
+
+associazioni_s
+associazioni_g
+```
+
+
+## *Latent Dirichlet Allocation* (LDA)
+
+Una volta costruite le *Document-Term Matrix* (DTM) per le singole serie e per la combinazione delle due, si è proceduto con un'analisi dei *topic* tramite il modello LDA (*Latent Dirichlet Allocation*), con l'obiettivo di individuare le tematiche latenti ricorrenti nei dialoghi. Inizialmente, il numero ottimale di *topic* è stato stimato tramite metriche diagnostiche (coerenza semantica, divergenza tra i *topic*, *log-likelihood*); tuttavia, per una migliore interpretabilità dei risultati, è stato adottato un criterio più soggettivo, basato sull'analisi dei termini più rappresentativi e sulla coerenza semantica interna di ciascun gruppo.
+
+Successivamente, per migliorare l’interpretabilità dei *topic*, sono stati assegnati dei titoli indicativi a ciascuno di essi. A supporto di questa fase, si è fatto ricorso ai riassunti degli episodi disponibili su IMDb, che hanno permesso di contestualizzare meglio i contenuti sottostanti ai singoli *topic* e di verificarne la corrispondenza narrativa.
+
+```{r}
+# DTM
+dtm_s = create_dtm(simpson_clean, prefix = 'S')
+dtm_g = create_dtm(griffin_clean, prefix = 'G')
+dtm_s2 = create_dtm(simpson_clean_2, prefix = 'S')
+dtm_g2 = create_dtm(griffin_clean_2, prefix = 'G')
+
+# Aggiungi il prefisso e unisci
+simpson_clean <- simpson_clean %>% mutate(prefix = "S")
+griffin_clean <- griffin_clean %>% mutate(prefix = "G")
+dati_dtm_tot <- bind_rows(simpson_clean, griffin_clean)
+
+simpson_clean_2 <- simpson_clean_2 %>% mutate(prefix = "S")
+griffin_clean_2 <- griffin_clean_2 %>% mutate(prefix = "G")
+dati_dtm_tot2 <- bind_rows(simpson_clean_2, griffin_clean_2)
+
+# Crea le DTM combinate
+dtm_tot <- create_dtm(dati_dtm_tot)
+dtm_tot2 <- create_dtm(dati_dtm_tot2)
+```
+
+### Analisi LDA delle serie combinate
+Attraverso il codice in Appendice D, viene effettuata una valutazione tramite quattro metriche diagnostiche per la scelta del numero *k* di *topic* ottimale. Sebbene le metriche suggeriscano circa 20/25 *topic*, i contenuti degli stessi sembrano ripetersi, perciò un'analisi qualitativa approfondita delle parole chiave e della coerenza semantica ha condotto alla decisione di adottare un modello con 9 *topic*. Tale scelta è stata adottata per bilanciare l'interpretabilità dei diversi gruppi. I *topic* con i nomi dei personaggi sono più caratterizzati da alcune personalità specifiche (es. Homer e la birra, Lisa e la scuola, ecc...).
+
+```{r results='asis'}
+# Carico direttamente i dati, costruiti con la funzione in appendice
+#load("data/LDA_k.RData")
+#load("data/LDA_k2.RData")
+
+# Definizione dei titoli dei topic (senza personaggi)
+titoli_senza_personaggi <- c(
+  "Famiglia",
+  "Episodi natalizi",
+  "Relazioni sociali",
+  "Cronaca",
+  "Amore e relazioni",
+  "Scuola",
+  "Tempo libero",
+  "Conversazioni",
+  "Lavoro e denaro"
+)
+
+# Definizione dei titoli dei topic (con i personaggi)
+titoli_con_personaggi <- c(
+  "Cronaca",
+  "Griffin",
+  "Famiglia",
+  "Amore e relazioni",
+  "Vita quotidiana",
+  "Tempo libero",
+  "Scuola",
+  "Lavoro e denaro",
+  "Simpson"
+)
+
+lda_results <- analyze_lda_titolati_table(lda_k, lda_k2, k = 9, n_top_terms = 15,
+                                          custom_titles_1 = titoli_senza_personaggi,
+                                          custom_titles_2 = titoli_con_personaggi)
+```
+
+### Analisi LDA per *I Simpson*
+
+Anche per i soli *Simpson*, le diagnostiche suggerivano 20/25 *topic*, ma un'analisi qualitativa ha evidenziato maggiore chiarezza con 7 *topic*.
+
+Tra gli altri, il *topic* "Televisione e intrattenimento" è stato nominato così in quanto caratterizzato da termini quali "movie", "Krusty", "tv", "watch" e "book", che richiamano contenuti mediali.
+Inoltre, il *topic* "Conversazioni" contiene termini discorsivi.
+Tra le parole contenute in "Homer e tempo libero" si trova *kill*, e si suppone sia dovuto ai continui litigi e strangolamenti di Homer e Bart.
+```{r}
+#
+#load("data/lda_k_s.RData")
+#load("data/lda_k_s2.RData")
+
+# Definizione dei titoli dei topic (senza personaggi)
+titoli_senza_personaggi_simpson <- c(
+ "Fede e morte",
+ "Amore e relazioni",
+ "Lavoro e denaro",
+ "Episodi natalizi",
+ "Famiglia",
+ "Scuola",
+ "Amicizia e tempo libero"
+)
+
+
+# Definizione dei titoli dei topic (con i personaggi)
+titoli_con_personaggi_simpson <- c(
+ "Conversazioni",
+ "Lisa e scuola",
+ "Homer e Marge",
+ "Bart",
+ "Televisione e intrattenimento",
+ "Homer e lavoro",
+ "Homer e tempo libero"
+)
+
+lda_results_s <- analyze_lda_serie_titolati(lda_k_s, lda_k_s2, k = 7, serie_nome = 'Simpson',
+                                          n_top_terms = 15,
+                                          custom_titles_1 = titoli_senza_personaggi_simpson,
+                                          custom_titles_2 = titoli_con_personaggi_simpson)
+```
+
+### Analisi LDA per *I Griffin*
+
+Per *i Griffin*, 15 *topic* sono considerati un buon numero secondo le diagnostiche, suggerendo una minore complessità tematica rispetto ai Simpson. Ciò emergeva anche dalla minor eterogeneità tra le stagioni, evidenziata nel capitolo di *Text mining*. Comunque, anche in questo caso, sono stati considerati meno *topic*, ritenendo 5 la scelta ottimale. 
+Può sembrare strano il *topic* "Violenza" dal momento che è presente il termine "Christmas", ma ciò è dovuto ad un episodio in cui Stewie and Brian decidono di andare al Polo Nord per "dare una lezione a Babbo Natale", come si può leggere nel riassunto ottenuto da IMDb. Inoltre, parole come *kill*, *hell* e *damn* riflettono i toni aggressivi della serie. 
+
+```{r}
+# Carico direttamente i dati, costruiti con la funzione in appendice(dove è stata modificata la dtm in uso)
+#load("data/LDA_k_g.RData")
+#load("data/LDA_k_g2.RData")
+
+# Definizione dei titoli dei topic (senza personaggi)
+titoli_senza_personaggi_griffin <- c(
+ "Famiglia",
+ "Società e news",
+ "Relazioni",
+ "Tempo libero",
+ "Violenza"
+)
+
+
+# Definizione dei titoli dei topic (con i personaggi)
+titoli_con_personaggi_griffin <- c(
+ "Personaggi secondari",
+ "Peter e Lois",
+ "Famiglia",
+ "Media e società",
+ "Brian e Stewie"
+)
+
+lda_results_g <- analyze_lda_serie_titolati(lda_k_g, lda_k_g2, k = 5, serie_nome = 'Griffin', n_top_terms = 15, custom_titles_1 = titoli_senza_personaggi_griffin, custom_titles_2 = titoli_con_personaggi_griffin)
+```
+
+#### Analisi degli episodi più significativi di ogni *topic*
+
+Sono stati uniti i risultati della LDA con i riassunti di IMDb; per esempio, in questo caso si mostrano alcuni riassunti del *topic* "Violenza" de *I Griffin*, dato che non era chiara la presenza del termine "Christmas"; ne *I Simpson*, invece, si può notare che il *topic* "Episodi natalizi" è composto dai numerosi episodi a tema, appunto, natalizio.
+Si può notare nella terza riga l'episodio de *I Griffin* a cui si faceva riferimento in precedenza.
+
+```{r}
+#creo id documento su imdb
+imdb$doc_id <- paste0(imdb$serie,"_S", ifelse(imdb$stagione < 10, paste0("0", imdb$stagione), imdb$stagione),
+                      "_E", ifelse(imdb$episodio < 10, paste0("0", imdb$episodio), imdb$episodio))
+
+# Unione dei risultati LDA con i riassunti IMDb
+# topics_1 no personaggi
+# topics_2 si personaggi
+lda_imdb_g <- lda_results_g$topics_1 %>% inner_join(imdb, by = c("document" = "doc_id"))
+lda_imdb_s <- lda_results_s$topics_1 %>% inner_join(imdb, by = c("document" = "doc_id"))
+
+# guardo i riassunti per ogni gruppo 
+# scegliere il topic 
+lda_imdb_g %>% filter(topic == 5) %>% arrange(desc(gamma)) %>% select(riassunto) %>% print(n=8)
+lda_imdb_s %>% filter(topic == 4) %>% arrange(desc(gamma)) %>% select(riassunto) %>% print(n=8)
+```
+
+## *Structural Topic Modeling*
+
+Passiamo ora alla modellazione tramite STM (*Structural Topic Modeling*), che rispetto alla LDA appena presentata permette di includere anche l'effetto di alcune covariate nell'assegnazione degli episodi ai vari *topic*.
+
+Inizializziamo alcuni vettori o matrici di variabili di cui indagheremo l'effetto per mezzo del *topic modeling* con STM. Le variabili sono: i presidenti degli Stati Uniti, l'anno di produzione della singola stagione ed i produttori delle rispettive serie. Si noti che per questi ultimi è necessario codificare una matrice di variabili indicatrici, data la saltuaria collaborazione tra produttori in stagioni differenti.
+
+```{r, echo=T, results='hide'}
+# Creazione df adatto con covariate ####
+tot_clean <- bind_rows(simpson_clean, griffin_clean)
+
+# simpson = 0, griffin = 1
+tot_clean$serie = c(rep("S", 784), rep("G", 432))
+
+anno = c(1989:2024, 1999, 1999, 2001, 2005:2024)
+# numero di episodi per stagione
+epi_per_stag = c(
+  rle(simpson_clean$stagione)$lengths,
+  rle(griffin_clean$stagione)$lengths
+)
+
+# per ogni episodio, l'anno corrispondente
+tot_clean$anni = rep(anno, epi_per_stag)
+
+presidenti <- tibble(anno = 1989:2025,
+                     presidente = c(
+                       rep('George H.W. Bush', 4),
+                       rep('Bill Clinton', 8),
+                       rep('George W. Bush', 8),
+                       rep('Barack Obama', 8),
+                       rep('Donald Trump', 4),
+                       rep('Joe Biden', 4),
+                       'Donald Trump'))
+
+tot_clean <- tot_clean %>% left_join(presidenti, by = c("anni" = "anno"))
+
+produttori = matrix(NA, 1216, 13)
+colnames(produttori) = c(
+  'Groening_Brooks_Simon',
+  'Jean',
+  'Reiss',
+  'Mirkin',
+  'Oakley_Weinstein',
+  'Scully',
+  'MacFarlane_Zuckerman',
+  'Palladino',
+  'Goodman_Sheridan',
+  'Hentemann',
+  'Callaghan',
+  'Sulkin',
+  'Appel'
+)
+
+somma = function(x,y){
+  return((cumsum(epi_per_stag[1:x])[x]+1):cumsum(epi_per_stag[1:y])[y])
+}
+
+# matrice dei produttori, dove 1 se presente, 0 altrimenti
+produttori[1:sum(epi_per_stag[1:2]), 1] = 1
+produttori[somma(2,4), 2:3] = 1
+produttori[somma(4,6), 4] = 1
+produttori[somma(6,8), 5] = 1
+produttori[somma(8,12), 6] = 1
+produttori[somma(10,36), 2] = 1
+produttori[somma(36,39), 7] = 1
+produttori[somma(38,39), 8] = 1
+produttori[somma(39,43), 9] = 1
+produttori[somma(43,46), 10] = 1
+produttori[somma(43,51), 11] = 1
+produttori[c(somma(46,49),somma(51,59)), 12] = 1
+produttori[somma(49,59), 13] = 1
+
+produttori <- as_tibble(produttori)
+
+produttori = ifelse(is.na(produttori), 0, 1)
+
+tot_clean <- bind_cols(tot_clean, produttori)
+
+tot_clean$doc_id <- paste0(tot_clean$serie,
+                           "_S", ifelse(tot_clean$stagione < 10, paste0("0", tot_clean$stagione), tot_clean$stagione),
+                           "_E", ifelse(tot_clean$episodio < 10, paste0("0", tot_clean$episodio), tot_clean$episodio))
+
+tot_clean_processed <- textProcessor(documents = tot_clean$testo, metadata = tot_clean)
+tot_clean_out <- prepDocuments(tot_clean_processed$documents, tot_clean_processed$vocab, tot_clean_processed$meta)
+
+tot_clean_out$meta$serie <- as.factor(tot_clean_out$meta$serie)
+```
+
+Tramite un processo di *trial-and-error* giungiamo a conclusioni analoghe a quelle tratte nella LDA: 9 *topic* sembra un numero ragionevole per distinguere gli argomenti trattati.
+L'analisi del modello stimato ha rivelato 9 macro-temi ricorrenti nelle due serie, simili a quelli osservati in precedenza con la LDA:
+
+1. Vita familiare
+2. Relazioni sentimentali
+3. Intrattenimento e media
+4. Festività natalizie
+5. Animali e comportamenti estremi
+6. Ambiente scolastico
+7. Economia e finanza
+8. Matrimonio
+9. Politica e attualità
+
+Distinguendo tra le due serie, si nota chiaramente il linguaggio più provocatorio e adulto che utilizzano *I Griffin*, come si è gia notato più volte.
+
+Si noti come si è deciso di utilizzare come variabile di *content* la serie di appartenenza degli episodi, perché si è ipotizzato che fosse la variabile che più influenza la scelta delle parole all'interno dei *topic*. Questa scelta fa sì che i *topic* non vengano definiti solo sulla base delle differenze linguistiche tra le serie, in modo da riflettere strutture concettuali condivise. Il focus, difatti, è posto ad un livello più alto dei singoli vocaboli, in questo *setting*. 
+
+```{r,  echo=T, results='hide'}
+# anno ####
+stm_anni <- stm(documents = tot_clean_out$documents,
+                  vocab = tot_clean_out$vocab,
+                  data = tot_clean_out$meta,
+                  K = 9,  
+                  prevalence = ~ anni,
+                  content = ~ serie)
+
+```
+```{r}
+# Distribuzione parola-topic ####
+stm_anni_topics <- tidy(stm_anni, matrix = "beta")
+
+# Crea il grafico delle prime 20 parole per topic
+stm_anni_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 20) %>%
+  ungroup() %>%
+  mutate(topic = paste("Topic", topic)) %>%
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(topic), scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y = NULL)
+```
+
+L'effetto degli anni (trattati come variabile continua) non risulta particolarmente forte. Si individuano due possibili motivazioni dietro a questo risultato: la prima è l'assenza di effetto della variabile, ma questo risulta poco plausibile; la seconda ipotesi, più probabile, è che il modello fatichi a cogliere un effetto non monotono o che subisca l'effetto di punti influenti, data la rigida struttura parametrica che impone.
+
+```{r}
+effect_anni <- estimateEffect(1:9 ~ anni, stmobj = stm_anni, metadata = tot_clean_out$meta)
+summary(effect_anni)
+
+par(mfrow = c(3,3))
+for(i in 1:9){
+  plot(effect_anni, covariate = "anni", method = "continuous", topics = i, ylim = c(0, 0.22), linecol = i, printlegend = F, main=paste0("Topic ", i))
+}
+```
+
+Si ripete la stessa analisi utilizzando i presidenti degli Stati Uniti come covariata, con la consapevolezza che `anni` e `presidenti` siano variabili fortemente correlate. Questa seconda strada vuole indagare in modo più approfondito le possibili influenze tra il contesto socio-economico dovuto ad una particolare presidenza e l'eventuale effetto di queste sulle serie tv in oggetto.
+Si noti come le parole più frequenti nei vari *topic* sono qualitativamente equivalenti a quelle ottenute nel modello precedente. Si manterranno dunque le nomenclature presentate precedentemente.
+
+```{r,  echo=T, results='hide'}
+# Presidente ####
+tot_clean_out$meta$presidente = factor(tot_clean_out$meta$presidente,
+                                       levels = c("George H.W. Bush", "Bill Clinton",
+                                                  "George W. Bush", "Barack Obama",
+                                                  "Donald Trump", "Joe Biden"))
+
+stm_presidente <- stm(documents = tot_clean_out$documents,
+                        vocab = tot_clean_out$vocab,
+                        data = tot_clean_out$meta, 
+                        K = 9,  # numero di topic
+                        prevalence = ~ -1 + presidente,
+                        content = ~ serie)
+
+```
+```{r}
+# Distribuzione parola-topic) ####
+stm_presidente_topics <- tidy(stm_presidente, matrix = "beta")
+
+# Crea il grafico delle prime 20 parole per topic
+stm_presidente_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 20) %>%
+  ungroup() %>%
+  mutate(topic = paste("Topic", topic)) %>%
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(topic), scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y = NULL)
+```
+
+Il grafico mostra l'effetto stimato dei diversi presidenti americani sulla prevalenza dei 9 *topic*. Si noti innanzitutto come presidenti le cui cariche sono state contigue mostrano una maggior somiglianza negli effetti stimati. Questo ci allontana dall'ipotesi dell'effetto dell'orientamento politico prevalente, ma rafforza l'ipotesi avanzata in precedenza riguardo un effetto non lineare del tempo. Questo fenomeno verrà approfondito in seguito.
+I vari *topic* presentano dei *trend* temporali abbastanza chiari (*topic* 1, 3, 8 e 9) o differenze poco marcate (*topic* 4, 5, 6, 7). L'unico a presentare un comportamento più peculiare è il *topic* 2, relativo alle relazioni sentimentali. Risulta però eccessivo ipotizzare che una presidenza democratica piuttosto che repubblicana renda Homer o Peter più o meno inclini al sentimentalismo, quindi si preferisce non dare un'interpretazione forte al modello.
+
+```{r}
+effect_presidente <- estimateEffect(1:9 ~ -1 + presidente, stmobj = stm_presidente, metadata = tot_clean_out$meta )
+
+par(mfrow = c(3,3))
+for(i in 1:9){
+  plot(effect_presidente, covariate = "presidente", method = "pointestimate", topics = i,
+       labeltype = 'custom', custom.labels = "", 
+       cex.lab = 0.9, cex = 0.9, cex.axis = 0.9, xlim = c(0, 0.2))
+  text(-0.025, seq(6, 1, by = -1), 
+       labels = c("H.W. Bush", "Clinton", "W. Bush", "Obama","Trump", "Biden"), 
+       xpd = T, adj=0.7)
+}
+```
+
+Per approfondire l'indagine sull'influenza dell'anno di produzione, si sono stimati altri due modelli, dal carattere meno parametrico. Nel primo caso, l'anno è trattato come fattore, mentre nel secondo si è sfruttato un lisciatore *spline* con 4 gradi di libertà. In questo modo, nel primo caso si lascia piena libertà al modello nella stima della forma dell'effetto, mentre nel secondo si impone una lieve struttura funzionale (non definita a priori). Queste analisi, rafforzate dalla coerenza tra l'andamento delle spline e degli effetti fattoriali, giustificano l'ipotesi di non monotonicità avanzata in precedenza. Risulta infatti evidente la presenza di un effetto temporale variabile.
+
+Alcuni *topic* mostrano una presenza relativamente costante nel tempo (*topic* 1, 5, 6, 7, 9).
+
+Il *topic* 2 (Relazioni sentimentali) presenta un andamento fondamentalmente bifasico: la sua frequenza è aumentata in modo marcato a partire dall’inizio del nuovo millennio.
+
+Il *topic* 3 (Intrattenimento e media) mostra invece un aumento costante della propria presenza nelle serie TV.
+
+Il *topic* 4 (Festività natalizie) registra un picco verso la fine degli anni ’90. Un’analisi più approfondita suggerisce un possibile andamento inverso rispetto al *topic* 2. È plausibile che i due *topic* abbiano una parziale sovrapposizione concettuale: le festività sono infatti spesso associate ai rapporti umani. Tale relazione potrebbe riflettere una scelta artistica da parte dei produttori, che rappresentano i rapporti umani in modi diversi, oppure potrebbe indicare una difficoltà del modello nel distinguere i due topic, data la loro similarità. Per formulare conclusioni più solide, sarebbe necessaria un’analisi più dettagliata.
+
+Infine, il *topic* 8 (Matrimonio) presenta un andamento piuttosto peculiare: inizialmente stabile, raggiunge un picco attorno al 2000, per poi seguire un *trend* decrescente e stabilizzarsi. Anche in questo caso, si osserva una possibile connessione con i due *topic* appena menzionati.
+
+```{r,  echo=T, results='hide'}
+# anno fattore
+meta2 <- tot_clean_out$meta
+meta2$anni <- factor(meta2$anni, levels = 1989:2024)
+stm_anni_fattore <- stm(documents = tot_clean_out$documents,
+                vocab = tot_clean_out$vocab,
+                data = meta2,
+                K = 9,  
+                prevalence = ~ anni,
+                content = ~ serie)
+```
+```{r}
+# Distribuzione parola-topic 
+stm_anni_fattore_topics <- tidy(stm_anni_fattore, matrix = "beta")
+
+# Crea il grafico delle prime 20 parole per topic
+stm_anni_fattore_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 20) %>%
+  ungroup() %>%
+  mutate(topic = paste("Topic", topic)) %>%
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(topic), scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y = NULL)
+
+effect_anni_fattore <- estimateEffect(1:9 ~ anni, stmobj = stm_anni_fattore, metadata = meta2)
+
+par(mfrow = c(3,3))
+for(i in 1:9){
+  plot(effect_anni_fattore, covariate = "anni", method = "pointestimate", topics = i, 
+       cex = 0.75, cex.axis = 0.8, xlim = c(-0.05, 0.3), verbose.labels = F, yaxt = "n", labeltype='custom',
+       custom.labels = "", main = paste0("Topic ", i))
+  text(-0.08, seq(36, 1, by = -5), labels = c("89", "94", "99", "04", "09", "14", "19", "24"), xpd = T, adj=1, cex = 0.7)
+}
+```
+
+```{r,  echo=T, results='hide'}
+# anni lisciato 
+stm_anni_liscio <- stm(documents = tot_clean_out$documents,
+                vocab = tot_clean_out$vocab,
+                data = tot_clean_out$meta,
+                K = 9,  
+                prevalence = ~ s(anni),
+                content = ~ serie)
+```
+```{r}
+# Distribuzione parola-topic ####
+stm_anni_liscio_topics <- tidy(stm_anni_liscio, matrix = "beta")
+
+# Crea il grafico delle prime 20 parole per topic
+stm_anni_liscio_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 20) %>%
+  ungroup() %>%
+  mutate(topic = paste("Topic", topic)) %>%
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(topic), scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y = NULL)
+
+effect_anni_liscio <- estimateEffect(1:9 ~ s(anni), stmobj = stm_anni_liscio, metadata = tot_clean_out$meta)
+
+par(mfrow = c(3,3))
+for(i in 1:9){
+  plot(effect_anni_liscio, covariate = "anni", method = "continuous", topics = i, ylim = c(-0.05, 0.25), linecol = i, printlegend = F, main=paste0("Topic ", i))
+}
+```
+
+Infine, si stima il modello che considera come covariate le varie presenze/assenze dei produttori nelle serie. Si noti come la correlazione con la variabile `anni` non è perfetta, a causa della presenza discontinua o della collaborazione tra produttori.
+
+```{r,  echo=T, results='hide'}
+# Produttori 
+f_prod <- paste0("~ - 1 + ", paste0(colnames(tot_clean)[7:19], collapse=" + "))
+stm_produttori <- stm(documents = tot_clean_out$documents,
+                        vocab = tot_clean_out$vocab,
+                        data = tot_clean_out$meta,
+                        K = 9, 
+                        prevalence = as.formula(f_prod),
+                        content = ~ serie)
+```
+```{r}
+# Riorganizza la matrice beta (distribuzione parola-topic) 
+stm_produttori_topics <- tidy(stm_produttori, matrix = "beta")
+
+# Crea il grafico delle prime 20 parole per topic
+stm_produttori_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 20) %>%
+  ungroup() %>%
+  mutate(topic = paste("Topic", topic)) %>%
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(topic), scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y = NULL)
+```
+
+A differenza delle altre covariate, i produttori non mostrano effetti particolarmente forti, fatte alcune eccezioni. Come osservato già in precedenza, alcuni *topic* non sembrano influenzati da fattori esterni: il *topic* 9 è l'esempio più evidente. Volgendo l'attenzione ai singoli produttori, si distinguono in particolare Palladino (per *I Griffin*) e Reiss (per *I Simpson*). L'effetto stimato di questi due produttori si distingue infatti in modo abbastanza costante al variare del *topic* considerato. È però bene precisare che il numero di episodi a cui ogni produttore ha contribuito è molto variabile, ed in alcuni casi anche ridotto. Questo può rendere più instabili le stime, e le conclusioni meno affidabili, come si nota dagli *standard error* talvolta elevati ed i conseguenti intervalli di confidenza ampi.
+
+```{r, fig.width=14, fig.height=12, fig.align='center', out.width='100%'}
+effect_produttori <- estimateEffect(as.formula(paste0("1:9 ", f_prod)), stmobj = stm_produttori, metadata = tot_clean_out$meta)
+
+df_plot <- bind_rows(lapply(1:9, function(i) {
+  eff <- summary(effect_produttori)$tables[[i]]
+  eff_df <- as.data.frame(eff)
+  eff_df$covariate <- rownames(eff_df)
+  eff_df$topic <- paste("Topic", i)
+  names(eff_df)[1:2] <- c("estimate", "se")
+  eff_df %>% mutate(
+    lower = estimate - 1.96 * se,
+    upper = estimate + 1.96 * se
+  )
+}))
+
+# Ordina covariate (in ordine inverso per allineamento)
+df_plot$covariate <- factor(df_plot$covariate,
+                            levels = rev(colnames(produttori)))
+
+# Costruisci il grafico
+ggplot(df_plot, aes(x = estimate, y = covariate)) +
+  geom_point(size = 2) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.3, size = 0.6) +
+  facet_wrap(~ topic, ncol = 3, scales = "free_y") +
+  scale_x_continuous(name = "Effetto stimato") +
+  ylab(NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_blank(),  
+    axis.text.y = element_text(size = 8),
+    axis.title.x = element_text(size = 10),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+Si ricorda che è difficile trarre conclusioni in senso causale in analisi statistiche di questo tipo, soprattutto perché la presenza di un *topic* può essere causata da una varietà di ragioni concomitanti, esogene o endogene alla produzione della serie. Queste difficoltà sono intrinseche alle analisi di tipo sociologico, dove il controllo delle variabili è spesso difficile, se non impossibile. Le evoluzioni delle serie analizzate potrebbero essere dovute ad uno sviluppo fisiologico delle stesse, o a preferenze espresse dal pubblico, ma allo stesso tempo un produttore o il contesto socio-culturale differenti potrebbero aver esercitato un'influenza analoga.
+
+
+## *Sentiment Analisys*
+Si prova ora ad analizzare il *sentiment* delle due serie in oggetto.
+Per effettuare la *Sentiment Analisys* si utilizza il metodo *lexicon-based*, che assegna ad ogni parola un punteggio da -5 (parola molto negativa) a +5 (parola molto positiva).
+
+```{r lexicon}
+# tokenizza il testo in singole parole
+token_simpson <- simpson_clean %>%
+  unnest_tokens(word, testo)
+token_griffin <- griffin_clean %>% 
+  unnest_tokens(word, testo)
+
+token_simpson_2 <- simpson_clean_2 %>%
+  unnest_tokens(word, testo)
+token_griffin_2 <- griffin_clean_2 %>% 
+  unnest_tokens(word, testo)
+
+# Carica il dataset dei dizionari di sentiment disponibili
+data("sentiments")
+
+# Estrae il dizionario AFINN
+lexicon <- get_sentiments("afinn") # Scala da -5 (negativo) a +5 (positivo)
+
+```
+
+Si calcolano dunque il *sentiment* medio per episodio, e poi per stagione.
+
+```{r sentiment s, results='hide'}
+# Calcola il sentiment medio per episodio
+sentiment_per_episode_s <- token_simpson %>%
+  left_join(lexicon, by = "word") %>%  # Unisce le parole con il loro punteggio di sentiment
+  group_by(stagione, episodio) %>%     # Raggruppa per stagione ed episodio
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),  # Calcola il sentiment medio, ignorando i NA
+    n_words = n()                           # Conta il numero di parole totali
+  ) %>%
+  filter(n_words > 10)  # Mantiene solo episodi con almeno 10 parole presenti nel dizionario
+
+# Calcola il sentiment medio per stagione dei Simpson
+sentiment_per_seasion_medio_s <- sentiment_per_episode_s %>%
+  group_by(stagione) %>%                   # Raggruppa per stagione
+  summarise(sentiment = mean(sentiment)) %>%  # Calcola la media dei sentiment per stagione
+  mutate(show = "simpson")                # Aggiunge una colonna che indica la serie
+```
+
+Per quanto concerne *I Simpson*, le prime tre stagioni mostrano un *sentiment* medio superiore relativamente alto, indicando un tono emotivo di media positivo. Dopo le prime stagioni, il *sentiment* medio si abbassa e rimane oscillante tra -0.05 e 0.1, con pochi *outlier*, segnalando una tendenza mediamente neutra o leggermente positiva. Infine, le ultime due stagioni mostrano un *sentiment* negativo (sotto lo zero), ad evidenziare un potenziale cambiamento di tono.
+
+```{r sentiment Simpson}
+# Grafico: sentiment medio per stagione dei Simpson
+sentiment_per_seasion_medio_s %>%
+  ggplot(aes(x = stagione, y = sentiment)) +  # Asse x = stagione, y = sentiment medio
+  geom_line(color = "#FFD700", linewidth = 1) + 
+  geom_point(size = 2, color = "#FFD700") +  
+  theme_minimal() +
+  labs(title = "Sentiment medio per stagione, I Simpson", x = "Stagione", y = "Sentiment (AFINN)")
+```
+
+Si ripete l'analisi del *sentiment* con lo stesso dizionario per *I Griffin*.
+
+```{r sentiment griffin, results='hide'}
+# Calcola il sentiment medio per episodio dei Griffin
+sentiment_per_episode_g <- token_griffin %>%
+  left_join(lexicon, by = "word") %>%  # Join con dizionario AFINN
+  group_by(stagione, episodio) %>%     # Raggruppa per stagione ed episodio
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),  # Media del sentiment
+    n_words = n()                           # Numero di parole nel dizionario per episodio
+  ) %>%
+  filter(n_words > 10)  # Esclude episodi con meno di 10 parole presenti nel dizionario
+
+# Calcola il sentiment medio per stagione dei Griffin
+sentiment_per_seasion_medio_g <- sentiment_per_episode_g %>%
+  group_by(stagione) %>%                    # Raggruppa per stagione
+  summarise(sentiment = mean(sentiment)) %>% # Calcola la media
+  mutate(show = "griffin")                 # Aggiunge colonna con nome serie
+```
+
+Il grafico mostra forti oscillazioni del *sentiment* medio, che varia da -0.2 a +0.2. In particolare, nelle stagioni 4 e 12 il *sentiment* è al minimo, mentre solo le ultime 4 stagioni presentano valori positivi.
+
+```{r grafico sent g}
+# Grafico: sentiment medio per stagione dei Griffin
+sentiment_per_seasion_medio_g %>%
+  ggplot(aes(x = stagione, y = sentiment)) +
+  geom_line(color = "#1E90FF", linewidth = 1) +
+  geom_point(size = 2, color = "#1E90FF") + 
+  theme_minimal() +
+  labs(title = "Sentiment medio per stagione, I Griffin", x = "Stagione", y = "Sentiment (AFINN)")
+
+```
+
+Il grafico combinato evidenzia meglio il carattere mediamente opposto delle due serie in termini di *sentiment*, anche se le ultime stagioni sembrano sollevare un'inversione.
+
+```{r grafico unico}
+# Unisce i dataset dei sentiment medi per stagione
+combined_results <- bind_rows(sentiment_per_seasion_medio_s %>% mutate(stagione = stagione + 1988), 
+                              sentiment_per_seasion_medio_g %>% mutate(stagione = stagione + 13 + 1988) )
+
+ggplot(combined_results, aes(
+  x = stagione,
+  y = sentiment,
+  color = show,
+  group = show
+)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("simpson" = "#FFD700", "griffin" = "#1E90FF"),  # Oro e blu
+    labels = c("I Griffin", "I Simpson")  # Etichette leggibili
+  ) +
+  labs(
+    title = "Confronto del Sentiment Medio per Stagione",
+    x = "Anno di produzione",
+    y = "Sentiment Medio (AFINN)",
+    color = "Serie TV"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+La *wordcloud* del *sentiment* mostra le parole più frequentri tra quelle con il *sentiment* più alto e più basso. La dimensione della parola riflette la sua frequenza, mentre l'intensità del colore è data dal punteggio assegnato (in verde le parole positive, in rosso le negative).
+
+I risultati non sono sorprendenti, e portano a supporre che le maggiori volgarità ed oscenità de *I Griffin* siano legate al *sentiment* decisamente inferiore, rispetto a *I Simpson*, notoriamente più *family-friendly*.
+
+```{r wordcloud sentiment s}
+# Preparazione dati Simpson
+polar_words_s <- token_simpson %>%
+  left_join(get_sentiments("afinn"), by = "word") %>%
+  filter(!is.na(value)) %>%
+  group_by(word) %>%
+  summarise(
+    freq=n(),
+    avg_sentiment = mean(value), 
+    .groups = "drop"
+  )
+
+# Ordina per sentiment medio (più positive)
+positive_words_s <- polar_words_s %>%
+  arrange(desc(avg_sentiment)) %>%  # Dal più positivo
+  head(50)  
+
+# Ordina per sentiment medio (più negative)
+negative_words_s <- polar_words_s %>%
+  arrange(avg_sentiment) %>%  # Dal più negativo
+  head(50)
+
+# Unisce le parole più positive e più negative
+combined_words_s <- bind_rows(positive_words_s, negative_words_s)
+
+# Grafico 
+ggplot(combined_words_s, aes(label = word, size = freq, color = avg_sentiment)) +
+  geom_text_wordcloud_area() +
+  scale_color_gradient2(
+    low = "red",
+    mid = "grey20",
+    high = "green3",
+    midpoint = 0,
+    name = "Sentiment"
+  ) +
+  scale_size_area(max_size = 15) +
+  labs(title = "Wordcloud - Parole più polarizzate nei Simpson") +
+  theme_minimal()
+```
+
+```{r wordcloud sentiment g}
+# Preparazione dati
+polar_words_g <- token_griffin %>%
+  left_join(get_sentiments("afinn"), by = "word") %>%
+  filter(!is.na(value)) %>%
+  group_by(word) %>%
+  summarise(
+    freq=n(), 
+    avg_sentiment = mean(value), 
+    .groups = "drop")
+
+# Ordina per sentiment medio (più positive)
+positive_words_g <- polar_words_g %>%
+  arrange(desc(avg_sentiment)) %>%  # Dal più positivo
+  head(50)  
+
+# Ordina per sentiment medio (più negative)
+negative_words_g <- polar_words_g %>%
+  arrange(avg_sentiment) %>%  # Dal più negativo
+  head(50)
+
+# Unisce le parole più positive e più negative
+combined_words_g <- bind_rows(positive_words_g, negative_words_g)
+
+ggplot(combined_words_g, aes(label = word, size = freq, color = avg_sentiment)) +
+  geom_text_wordcloud_area() +
+  scale_color_gradient2(
+    low = "red",
+    mid = "grey20",
+    high = "green3",
+    midpoint = 0,
+    name = "Sentiment"
+  ) +
+  scale_size_area(max_size = 15) +
+  labs(title = "Wordcloud - Parole più polarizzate nei Griffin") +
+  theme_minimal()
+```
+
+
+### Sentiment dei *topic*
+Si è ritenuto d'interesse analizzare il *sentiment* medio per ciascun *topic*, sia per le serie prese singolarmente, sia nel caso congiunto. Di seguito, si prelevano dagli oggetti di *topic modeling* le appartenenze dei vari episodi, per poi fare un *join* con i dati di IMDb.
+
+```{r nomi topic s e g, echo=T,include=FALSE}
+# Nomi topic
+# Simpson e Griffin
+tot9_topics <- analyze_lda(lda_k, lda_k2, k = 9, n_top_terms = 10)
+tot9_topics$topics_2 <- tot9_topics$topics_2 %>% inner_join(imdb, by = c("document" = "doc_id"))
+tot9_topics$topics_1 <- tot9_topics$topics_1 %>% inner_join(imdb, by = c("document" = "doc_id"))
+
+titoli_topic_tot <- c(
+"Famiglia",
+  "Episodi natalizi",
+  "Relazioni sociali",
+  "Cronaca",
+  "Amore e relazioni",
+  "Scuola",
+  "Tempo libero",
+  "Conversazioni",
+  "Lavoro e denaro")
+
+titoli_topic_tot_2 <- c(
+  "Cronaca",
+  "Griffin",
+  "Famiglia",
+  "Amore e relazioni",
+  "Vita quotidiana",
+  "Tempo libero",
+  "Scuola",
+  "Lavoro e denaro",
+  "Simpson") 
+
+tot9_topics$top_terms_1$titolo_topic <- titoli_topic_tot[tot9_topics$top_terms_1$topic]
+tot9_topics$top_terms_2$titolo_topic <- titoli_topic_tot_2[tot9_topics$top_terms_2$topic]
+tot9_topics$top_docs_1$titolo_topic <- titoli_topic_tot[tot9_topics$top_docs_1$topic]
+tot9_topics$top_docs_2$titolo_topic <- titoli_topic_tot_2[tot9_topics$top_docs_2$topic]
+tot9_topics$topics_1$titolo_topic <- titoli_topic_tot[tot9_topics$topics_1$topic]
+tot9_topics$topics_2$titolo_topic <- titoli_topic_tot_2[tot9_topics$topics_2$topic]
+```
+
+```{r nomi topic s, echo=T,include=FALSE}
+# Nomi topic Simpson
+tot7_topics <- analyze_lda_serie(lda_k_s, lda_k_s2, k = 7, n_top_terms = 10, serie_nome = "Simpson")
+
+temp <- tot7_topics$topics_2 %>% inner_join(imdb, by = c("document" = "doc_id"))
+tot7_topics$topics_2 <- temp
+
+temp2 <- tot7_topics$topics_1 %>% inner_join(imdb, by = c("document" = "doc_id"))
+tot7_topics$topics_1 <- temp2
+
+titoli_topic_s <- c( "Fede e morte",
+ "Amore e relazioni",
+ "Amicizia e tempo libero",
+ "Episodi natalizi",
+ "Famiglia",
+ "Scuola",
+ "Lavoro e denaro")
+
+titoli_topic_s2 <- c("Conversazioni",
+                     "Lisa e scuola", 
+                     "Homer e Marge", 
+                     "Bart",
+                     "Televisione e intrattenimento",
+                     "Homer e lavoro", 
+                     "Homer e tempo libero")
+
+tot7_topics$top_terms_1$titolo_topic <- titoli_topic_s[tot7_topics$top_terms_1$topic]
+tot7_topics$top_terms_2$titolo_topic <- titoli_topic_s2[tot7_topics$top_terms_2$topic]
+tot7_topics$top_docs_1$titolo_topic <- titoli_topic_s[tot7_topics$top_docs_1$topic]
+tot7_topics$top_docs_2$titolo_topic <- titoli_topic_s2[tot7_topics$top_docs_2$topic]
+tot7_topics$topics_1$titolo_topic <- titoli_topic_s[tot7_topics$topics_1$topic]
+tot7_topics$topics_2$titolo_topic <- titoli_topic_s2[tot7_topics$topics_2$topic]
+
+```
+
+```{r nomi topic g, echo=T,include=FALSE}
+# Nomi topic Griffin
+tot5_topics <- analyze_lda_serie(lda_k_g, lda_k_g2, k = 5, n_top_terms = 10, serie_nome = "Griffin")
+
+tot5_topics$topics_2 <- tot5_topics$topics_2 %>% inner_join(imdb, by = c("document" = "doc_id"))
+tot5_topics$topics_1 <- tot5_topics$topics_1 %>% inner_join(imdb, by = c("document" = "doc_id"))
+
+titoli_topic_g <- c("Famiglia", 
+                    "Società e news", 
+                    "Relazioni", 
+                    "Tempo libero", 
+                    "Violenza")
+titoli_topic_g2 <- c("Personaggi secondari", 
+                     "Peter e Lois", 
+                     "Famiglia", 
+                     "Media e società", 
+                     "Brian e Stewie")
+
+tot5_topics$top_terms_1$titolo_topic <- titoli_topic_g[tot5_topics$top_terms_1$topic]
+tot5_topics$top_terms_2$titolo_topic <- titoli_topic_g2[tot5_topics$top_terms_2$topic]
+tot5_topics$top_docs_1$titolo_topic <- titoli_topic_g[tot5_topics$top_docs_1$topic]
+tot5_topics$top_docs_2$titolo_topic <- titoli_topic_g2[tot5_topics$top_docs_2$topic]
+tot5_topics$topics_1$titolo_topic <- titoli_topic_g[tot5_topics$topics_1$topic]
+tot5_topics$topics_2$titolo_topic <- titoli_topic_g2[tot5_topics$topics_2$topic]
+
+```
+
+Questo blocco si occupa di unire dati testuali, *sentiment analysis*, *topic modeling* e *rating IMDb*, sia per la versione con i personaggi che per quella senza.
+
+```{r analisi s per topic s e g, echo=T,include=FALSE}
+# Unisce i dati testuali di Simpson e Griffin, aggiungendo una colonna "serie" (S o G)
+tot_clean <- bind_rows(simpson_clean %>% mutate(serie = rep("S", nrow(simpson_clean))), 
+                       griffin_clean %>% mutate(serie = rep("G", nrow(griffin_clean))))
+
+tot_clean_2 <- bind_rows(simpson_clean_2 %>% mutate(serie = rep("S", nrow(simpson_clean_2))), 
+                         griffin_clean_2 %>% mutate(serie = rep("G", nrow(griffin_clean_2))))
+
+# Tokenizza
+token_tot <- tot_clean %>% unnest_tokens(word, testo)
+token_tot_2 <- tot_clean_2 %>% unnest_tokens(word, testo)
+
+# Unisce le parole con il dizionario (lexicon), calcola il sentiment medio e conta le parole
+sentiment_tot <- token_tot %>%
+  left_join(lexicon, by = "word") %>%
+  group_by(serie, stagione, episodio) %>%
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),
+    n_words = n()
+  ) %>%
+  filter(n_words > 10) 
+
+sentiment_tot_2 <- token_tot_2 %>%
+  left_join(lexicon, by = "word") %>%
+  group_by(serie, stagione, episodio) %>%
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),
+    n_words = n()
+  ) %>%
+  filter(n_words > 10) 
+
+# Crea un ID univoco per episodio
+sentiment_tot$doc_id <- paste0(
+  sentiment_tot$serie, 
+  "_S", ifelse(sentiment_tot$stagione < 10,paste0("0", sentiment_tot$stagione), sentiment_tot$stagione), 
+  "_E", ifelse(sentiment_tot$episodio < 10, paste0("0", sentiment_tot$episodio), sentiment_tot$episodio))
+
+sentiment_tot_2$doc_id <- paste0(
+  sentiment_tot_2$serie, 
+  "_S", ifelse(sentiment_tot_2$stagione < 10, paste0("0", sentiment_tot_2$stagione), sentiment_tot_2$stagione), 
+  "_E", ifelse(sentiment_tot_2$episodio < 10, paste0("0", sentiment_tot_2$episodio), sentiment_tot_2$episodio))
+
+# Unisce sentiment + topic + rating IMDb
+sentiment_lda_imdb_tot <- sentiment_tot %>% inner_join(tot9_topics$topics_1[,-c(5,6,7)], by = c("doc_id" = "document"))
+
+sentiment_lda_imdb_tot_2 <- sentiment_tot_2 %>% inner_join(tot9_topics$topics_2[,-c(5,6,7)], by = c("doc_id" = "document"))
+```
+
+I *boxplot* mostrati rappresentano la distribuzione del *sentiment* per episodio, suddivisa per *topic*.
+La maggior parte dei *topic* ha una mediana del *sentiment* prossima allo zero, suggerendo un tono tendenzialmente neutro.
+Tuttavia, esistono differenze tra i *topic* in termini di posizione e variabilità. Ad esempio, Relazioni amorose, Relazioni familiari e Tempo libero mostrano le mediane più alte, con distribuzioni orientate verso il positivo. Ciò non deve sorprendere, dato che le parole associate a questi argomenti tendono ad avere uno *score* superiore allo zero.
+Conversazioni e Cronaca (generalmente basata su eventi esageratamente negativi, come disastri naturali o omicidi in chiave comica) hanno mediane più basse e un’estensione maggiore verso il negativo.
+
+```{r boxplot topic s e g}
+# sentiment medio dei topic
+# sentiment_lda_imdb_tot %>%
+#   group_by(titolo_topic) %>%
+#   summarise(sentiment = mean(sentiment))
+# 
+# sentiment_lda_imdb_tot_2 %>%
+#   group_by(titolo_topic) %>%
+#   summarise(sentiment = mean(sentiment))
+
+# boxplot topic
+ggplot(sentiment_lda_imdb_tot, aes(x = factor(titolo_topic), y = sentiment)) +
+  geom_boxplot(fill = "#2ECC71", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribuzione del sentiment per topic senza personaggi",
+    x = "Topic",
+    y = "Sentiment medio (episodi)"
+  ) +
+  theme_minimal()
+
+ggplot(sentiment_lda_imdb_tot_2, aes(x = factor(titolo_topic), y = sentiment)) +
+  geom_boxplot(fill = "#2ECC71", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribuzione del sentiment per topic con personaggi",
+    x = "Topic",
+    y = "Sentiment medio (episodi)"
+  ) +
+  theme_minimal()
+```
+
+Di seguito, si manipolano ulteriormente i dati per un grafico trivariato.
+
+```{r andamento per anno}
+# Vettore degli anni in cui sono usciti gli episodi
+anno = c(1989:2024, 1999, 1999, 2001, 2005:2024)
+
+# Numero di episodi per stagione per ciascuna serie, calcolato con rle()
+epi_per_stag = c(
+  rle(simpson_clean$stagione)$lengths,
+  rle(griffin_clean$stagione)$lengths
+)
+
+# Costruisce un dataframe con informazioni su anno, serie, stagione e episodio
+anni <- data.frame(
+  anno = rep(anno, epi_per_stag),
+  serie = c(rep("S", nrow(simpson_clean)), 
+            rep("G", nrow(griffin_clean))),
+  stagione = tot_clean$stagione,
+  episodio = tot_clean$episodio)
+
+# Crea un identificativo univoco per ogni episodio
+anni$doc_id <- paste0(
+  anni$serie, 
+  "_S", ifelse(anni$stagione < 10, paste0("0", anni$stagione), anni$stagione), 
+  "_E", ifelse(anni$episodio < 10, paste0("0", anni$episodio), anni$episodio))
+
+# Unisce il dataframe "anni" al dataframe dei risultati di sentiment+topic, usando doc_id
+sentiment_lda_imdb_tot <- sentiment_lda_imdb_tot %>% inner_join(anni, by = c("doc_id" = "doc_id"))
+
+sentiment_lda_imdb_tot_2 <- sentiment_lda_imdb_tot_2 %>% inner_join(anni, by = c("doc_id" = "doc_id"))
+```
+
+Il seguente grafico mostra l’andamento del *sentiment* medio nei dialoghi delle due serie, suddiviso per tema. 
+In generale, i sentiment sono piuttosto stabili nel tempo, con oscillazioni locali che non si evolgono in trend temporali. 
+Temi come Amore e relazioni ed Episodi natalizi mostrano un tono mediamente positivo, mentre Cronaca e Famiglia risultano più instabili o negativi in alcuni periodi. 
+Il calo di sentiment dai primi anni 2000 in poi di Lavoro e denaro e Cronaca può essere collegato a eventi che hanno segnato profondamente la cronaca Statunitense, come l'attentato dell’11 settembre e la crisi economica del 2008, portando a episodi più seri o cupi. Al contrario, i picchi positivi in Tempo libero e Relazioni sociali riflettono una spinta verso la leggerezza, forse per controbilanciare i tempi difficili.
+In molte categorie, infine, il sentiment negli anni più recenti tende ad avvicinarsi allo zero, suggerendo una maggiore neutralità nei toni usati.
+
+```{r sentiment x topic x anno s e g}
+# Calcola il sentiment medio per ogni topic in ogni anno, e crea un grafico a linee
+sentiment_lda_imdb_tot %>%
+  group_by(titolo_topic, anno) %>%                            # Raggruppa per topic e anno
+  summarise(sentiment_medio = mean(sentiment), .groups = "drop") %>%  # Calcola il sentiment medio
+  ggplot(aes(x = anno, y = sentiment_medio)) + # Imposta asse x (anno) e y (sentiment medio)
+  ylim(-1.2, 1.2) +
+  geom_line(color = "#2ECC71", size = 0.8) +                   # Aggiunge linea verde
+  geom_point(size = 1.5, color = "#117A65") +                  # Aggiunge punti per ogni anno
+  facet_wrap(~ titolo_topic, ncol = 3, scales = "free_y") +   # Un grafico per ogni topic (3 colonne)
+  labs(
+    title = "Andamento del Sentiment per Anno, diviso per Topic",  # Titolo del grafico
+    x = "Anno",                                                    # Etichetta asse x
+    y = "Sentiment Medio"                                          # Etichetta asse y
+  ) +
+  theme_minimal(base_size = 12) +                            # Tema minimal, testo leggibile
+  theme(
+    strip.text = element_text(face = "bold"),                # Etichette dei facet in grassetto
+    axis.text.x = element_text(angle = 45, hjust = 1)        # Inclina l’asse x per evitare sovrapposizione
+  )
+```
+
+Non si notano differenze qualitative tra l'analisi con e senza i nomi dei personaggi
+
+```{r}
+# Calcola il sentiment medio per ogni topic in ogni anno (senza nomi dei personaggi), e crea un grafico coerente
+sentiment_lda_imdb_tot_2 %>%
+  group_by(titolo_topic, anno) %>%                            # Raggruppa per topic e anno
+  summarise(sentiment_medio = mean(sentiment), .groups = "drop") %>% # Calcola il sentiment medio
+  ggplot(aes(x = anno, y = sentiment_medio)) +     # Imposta asse x e y come nel primo grafico
+  ylim(-1.2, 1.2) +
+  geom_line(color = "#2ECC71", size = 0.8) +                  # Stessa linea verde e spessore
+  geom_point(size = 1.5, color = "#117A65") +                 # Stessi punti verde scuro
+  facet_wrap(~ titolo_topic, ncol = 3, scales = "free_y") +   # Stesso layout dei facet
+  labs(
+    title = "Andamento del Sentiment per Anno (senza nomi dei personaggi)",
+    x = "Anno",
+    y = "Sentiment Medio"
+  ) +
+  theme_minimal(base_size = 12) +                         # Tema e font coerenti
+  theme(
+    strip.text = element_text(face = "bold"),             # Etichette dei facet in grassetto
+    axis.text.x = element_text(angle = 45, hjust = 1)     # Inclina l’asse x come nel primo
+  )
+
+```
+
+
+Si ripete la medesima analisi, riferita unicamente alla serie tv *I Simpson*.
+
+```{r analisi s per, echo=T,include=FALSE}
+# Tokenizza (suddivide in parole) i testi degli episodi dei Simpson
+token_simpson <- simpson_clean %>% unnest_tokens(word, testo)
+token_simpson_2 <- simpson_clean_2 %>% unnest_tokens(word, testo)
+
+# Calcola il sentiment medio per episodio
+sentiment_s <- token_simpson %>%
+  left_join(lexicon, by = "word") %>%                          # Unisce il lessico con le parole
+  group_by(stagione, episodio) %>%                             # Raggruppa per stagione ed episodio
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),                     # Calcola media del sentiment
+    n_words = n()                                              # Conta le parole
+  ) %>%
+  filter(n_words > 10)                                         # Esclude episodi troppo corti
+
+sentiment_s2 <- token_simpson_2 %>%
+  left_join(lexicon, by = "word") %>%
+  group_by(stagione, episodio) %>%
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),
+    n_words = n()
+  ) %>%
+  filter(n_words > 10)
+
+# Crea identificativi univoci per ogni episodio
+sentiment_s$doc_id <- paste0(
+  "S_S", ifelse(sentiment_s$stagione < 10, paste0("0", sentiment_s$stagione), sentiment_s$stagione), 
+  "_E", ifelse(sentiment_s$episodio < 10, paste0("0", sentiment_s$episodio), sentiment_s$episodio))
+sentiment_s2$doc_id <- paste0(
+  "S_S", ifelse(sentiment_s2$stagione < 10, paste0("0", sentiment_s2$stagione), sentiment_s2$stagione), 
+  "_E", ifelse(sentiment_s2$episodio < 10, paste0("0", sentiment_s2$episodio), sentiment_s2$episodio))
+
+# Combina sentiment, topic e rating per ogni episodio 
+sentiment_lda_imdb_s <- sentiment_s %>%
+  inner_join(tot7_topics$topics_1[,-c(6,7)], by = c("doc_id" = "document"))
+
+sentiment_lda_imdb_s2 <- sentiment_s2 %>%
+  inner_join(tot7_topics$topics_2[,-c(6,7)], by = c("doc_id" = "document"))
+
+#sentiment medio per ciascun topic
+sentiment_lda_imdb_s %>%
+  group_by(topic) %>%
+  summarise(sentiment = mean(sentiment))
+
+sentiment_lda_imdb_s2 %>%
+  group_by(topic) %>%
+  summarise(sentiment = mean(sentiment))
+```
+
+La maggior parte dei *topic* ha una mediana del *sentiment* prossima allo zero, ma esistono differenze tra i *topic* in termini di posizione e variabilità.
+Amore e relazioni e Famiglia sono i *topic* che presentano mediane più alte. Al contrario Fede e morte ha la distribuzione più bassa, con diversi *outlier*, probabilmente riflettendo la satira religiosa tipica dei Simpson.
+Lavoro e denaro mostra una distribuzione prevalentemente negativa, coerente con la critica sociale della serie verso il capitalismo e le disuguaglianze economiche.
+La forte variabilità in molte categorie testimonia la ricchezza narrativa della serie nel corso degli anni.
+
+```{r boxplot senza personaggi s}
+ggplot(sentiment_lda_imdb_s, aes(x = factor(titolo_topic), y = sentiment)) +
+  geom_boxplot(fill = "#FFD700", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribuzione del sentiment per topic senza personaggi, I Simpson",
+    x = "Topic",
+    y = "Sentiment medio (episodi)"
+  ) +
+  theme_minimal()
+
+```
+
+Anche nell'analisi con i personaggi, si mantengono le stesse caratteristiche viste in precedenza. 
+
+```{r boxplot con personaggi s}
+ggplot(sentiment_lda_imdb_s2, aes(x = factor(titolo_topic), y = sentiment)) +
+  geom_boxplot(fill = "#FFD700", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribuzione del sentiment per topic con personaggi, I Simpson",
+    x = "Topic",
+    y = "Sentiment medio (episodi)"
+  ) +
+  theme_minimal()
+```
+
+L'analisi con i personaggi mostra generalmente più variabilità al variare delle stagioni rispetto all'analisi senza personaggi, suggerendo come la presenza dei protagonisti amplifichi le dinamiche emotive della serie.
+Molti temi, come quelli legati alle Conversazioni, alla Scuola o al Tempo libero mostrano un sentiment relativamente stabile nel tempo, mentre tra quelli con maggiori oscillazioni si può notare il *topic* legato agli episodi incentrati su Bart, che riporta alcuni dei picchi emotivi più estremi, riflettendo probabilmente la sua natura di personaggio catalizzatore di situazioni drammatiche. Anche i temi legati al Tempo libero e al Lavoro di Homer hanno picchi notevoli ed opposti intorno alle stagioni 25-30, forse riflettendo un focus su diversi aspetti della vita quotidiana del personaggio.
+Nelle stagioni più recenti, infine, si osserva una certa stabilizzazione del sentiment per molti temi, indicando una maggiore maturità narrativa o una formula più consolidata.
+
+```{r sent x topic s}
+sentiment_lda_imdb_s %>%
+  group_by(titolo_topic, stagione) %>%
+  summarise(sentiment_medio = mean(sentiment), .groups = "drop") %>%
+  ggplot(aes(x = stagione, y = sentiment_medio)) +
+  geom_line(color = "#FFD700", size = 0.5) +
+  geom_point(size = 1) +
+  facet_wrap(~ titolo_topic, ncol = 3) +
+  labs(
+    title = "Andamento del sentiment per stagione e topic (senza personaggi)",
+    x = "Stagione",
+    y = "Sentiment medio"
+  ) +
+  theme_minimal()
+
+sentiment_lda_imdb_s2 %>%
+  group_by(titolo_topic, stagione) %>%
+  summarise(sentiment_medio = mean(sentiment), .groups = "drop") %>%
+  ggplot(aes(x = stagione, y = sentiment_medio)) +
+  geom_line(color = "#FFD700", size = 0.5) +
+  geom_point(size = 1) +
+  facet_wrap(~ titolo_topic, ncol = 3, labeller = labeller(topic = titoli_topic_s2)) +
+  labs(
+    title = "Andamento del sentiment per stagione e topic (con personaggi)",
+    x = "Stagione",
+    y = "Sentiment medio"
+  ) +
+  theme_minimal()
+```
+
+Si ripete la stessa analisi per *I Griffin*.
+
+```{r analisi sent topic g, echo=T,include=FALSE}
+token_griffin <- griffin_clean %>% unnest_tokens(word, testo)
+token_griffin_2 <- griffin_clean_2 %>% unnest_tokens(word, testo)
+
+sentiment_g <- token_griffin %>%
+  left_join(lexicon, by = "word") %>%
+  group_by(stagione, episodio) %>%
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),
+    n_words = n()
+  ) %>%
+  filter(n_words > 10) 
+
+sentiment_g2 <- token_griffin_2 %>%
+  left_join(lexicon, by = "word") %>%
+  group_by(stagione, episodio) %>%
+  summarise(
+    sentiment = mean(value, na.rm = TRUE),
+    n_words = n()
+  ) %>%
+  filter(n_words > 10) 
+
+sentiment_g$doc_id <- paste0(
+  "G_S", ifelse(sentiment_g$stagione < 10, paste0("0", sentiment_g$stagione), sentiment_g$stagione), 
+  "_E", ifelse(sentiment_g$episodio < 10, paste0("0", sentiment_g$episodio), sentiment_g$episodio))
+sentiment_g2$doc_id <- paste0(
+  "G_S", ifelse(sentiment_g2$stagione < 10, paste0("0", sentiment_g2$stagione), sentiment_g2$stagione), 
+  "_E", ifelse(sentiment_g2$episodio < 10, paste0("0", sentiment_g2$episodio), sentiment_g2$episodio))
+
+sentiment_lda_imdb_g <- sentiment_g %>% inner_join(tot5_topics$topics_1[-c(6,7)], by = c("doc_id" = "document"))
+sentiment_lda_imdb_g2 <- sentiment_g2 %>% inner_join(tot5_topics$topics_2[-c(6,7)], by = c("doc_id" = "document"))
+
+sentiment_lda_imdb_g %>%
+  group_by(topic) %>%
+  summarise(sentiment = mean(sentiment))
+
+sentiment_lda_imdb_g2 %>%
+  group_by(topic) %>%
+  summarise(sentiment = mean(sentiment))
+```
+
+I *boxplot* del *sentiment* per *topic* sembrano mantenere una mediana attorno allo 0, con un valore leggermente superiore per il *topic* Relazioni e inferiore per Violenza, riflettendo il forte utilizzo di parole scurrili e dalla caratterizzazione negativa nella serie. Si noti inoltre come per questa serie la variabilità del *sentiment* sia superiore, soprattutto verso valori negativi, rispetto a *I Simpson*, riflettendo una narrazione caratterizzata da toni più crudi e contenuti per un pubblico maturo. La serie adotta deliberatamente un approccio narrativo più diretto e provocatorio della precedente.
+
+```{r boxplot topic g}
+ggplot(sentiment_lda_imdb_g, aes(x = factor(titolo_topic), y = sentiment)) +
+  geom_boxplot(fill = "lightblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribuzione del sentiment per topic senza personaggi, I Griffin",
+    x = "Topic",
+    y = "Sentiment medio (episodi)"
+  ) +
+  theme_minimal()
+
+ggplot(sentiment_lda_imdb_g2, aes(x = factor(titolo_topic), y = sentiment)) +
+  geom_boxplot(fill = "lightblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribuzione del sentiment per topic con personaggi, I Griffin",
+    x = "Topic",
+    y = "Sentiment medio (episodi)"
+  ) +
+  theme_minimal()
+```
+
+Questo grafico mostra l'evoluzione del *sentiment* per diversi topic ne *I Griffin* attraverso le stagioni della serie.
+In generale, sembra ci sia un *trend* leggermente decrescente del *sentiment* medio nelle prime cinque stagioni e poi un graduale aumento. 
+Famiglia mostra un chiaro *trend* di miglioramento nel tempo, partendo da valori negativi nelle prime stagioni per diventare progressivamente più positivo. Questo suggerisce come la serie abbia sviluppato nel tempo una rappresentazione più affettuosa della famiglia Griffin. Anche Tempo libero presenta una tendenza generale crescente, successivamente alle prime stagioni.
+Violenza presenta il *pattern* più interessante e meno conforme alle aspettative, iniziando con valori negativi, raggiungendo un picco molto negativo intorno alla stagione 5 (probabilmente il periodo più controverso della serie), per poi risalire verso valori neutri nelle stagioni successive.
+L'evoluzione suggerisce una maturazione della serie nel tempo. *I Griffin* sembrano aver sviluppato una rappresentazione più positiva dei rapporti familiari e interpersonali, moderando invece gli aspetti più controversi legati alla violenza. Questo potrebbe riflettere sia un'evoluzione creativa che una risposta alle critiche ricevute nelle stagioni centrali della serie.
+La versione senza personaggi non presenta differenze apprezzabili nei *trend*.
+
+```{r sentiment x topic x stagione g}
+sentiment_lda_imdb_g %>%
+  group_by(titolo_topic, stagione) %>%
+  summarise(sentiment_medio = mean(sentiment), .groups = "drop") %>%
+  ggplot(aes(x = stagione, y = sentiment_medio)) +
+  geom_line(color = "lightblue", size = 0.5) +
+  geom_point(size = 1) +
+  facet_wrap(~ titolo_topic, ncol = 3) +
+  labs(
+    title = "Andamento del sentiment per stagione e topic (senza personaggi)",
+    x = "Stagione",
+    y = "Sentiment medio"
+  ) +
+  theme_minimal()
+
+sentiment_lda_imdb_g2 %>%
+  group_by(titolo_topic, stagione) %>%
+  summarise(sentiment_medio = mean(sentiment), .groups = "drop") %>%
+  ggplot(aes(x = stagione, y = sentiment_medio)) +
+  geom_line(color = "lightblue", size = 0.5) +
+  geom_point(size = 1) +
+  facet_wrap(~ titolo_topic, ncol = 3) +
+  labs(
+    title = "Andamento del sentiment per stagione e topic (con personaggi)",
+    x = "Stagione",
+    y = "Sentiment medio"
+  ) +
+  theme_minimal()
+
+```
+
+Si confrontano in seguito i *topic* comuni presenti ne *I Simpson* e *I Griffin*, nei grafici degli andamenti la prima stagione de *I Griffin* è allineata alla 14° stagione de *I Simpson* per sincronizzare temporalmente le due serie.
+
+```{r titoli topic s e g}
+titoli_topic_s <- c( "Fede e morte",
+ "Amore e relazioni",
+ "Amicizia e tempo libero",
+ "Episodi natalizi",
+ "Famiglia",
+ "Scuola",
+ "Lavoro e denaro")
+
+titoli_topic_s2 <- c("Conversazioni",
+                     "Lisa e scuola", 
+                     "Homer e Marge", 
+                     "Bart",
+                     "Televisione e intrattenimento",
+                     "Homer e lavoro", 
+                     "Homer e tempo libero")
+
+titoli_topic_g <- c("Famiglia", 
+                    "Società e news", 
+                    "Relazioni", 
+                    "Tempo libero", 
+                    "Violenza")
+
+titoli_topic_g2 <- c("Personaggi secondari", 
+                     "Peter e Lois", 
+                     "Famiglia", 
+                     "Media e società", 
+                     "Brian e Stewie")
+
+```
+
+Il confronto tra *I Simpson* (S) e *I Griffin* (G) sul topic "Famiglia" rivela forti differenze nella trattazione del tema familiare nelle due serie.
+*I Simpson* mostrano una distribuzione del *sentiment* familiare nettamente più positiva, con mediana sopra lo zero e quartili prevalentemente positivi, mentre *I Griffin* presentano una distribuzione più negativa, più orientata verso valori negativi.
+Nel grafico di destra *I Simpson* mantengono un andamento relativamente stabile nel tempo, ad eccezione di alcuni picchi negativi nelle ultime stagioni; *I Griffin* presentano valori molto negativi nelle prime stagioni per poi mostrare un carattere crescente, raggiungendo e superando *I Simpson* nelle stagioni più recenti. Le due serie mostrano andamenti concordi in diversi momenti.
+*I Simpson* hanno sempre mantenuto un approccio fondamentalmente affettuoso verso la famiglia, nonostante la satira.
+*I Griffin* hanno iniziato con una rappresentazione molto più cinica e disfunzionale dell'ambito familiare, ma si sono moderati nel tempo.
+
+```{r}
+library(patchwork)
+# Confronto tra Simpson (topic 5) e Griffin (topic 1) per il topic "Famiglia"
+# Boxplot della distribuzione del sentiment per il topic "Famiglia" in ciascuna serie
+b1 <- ggplot(
+  bind_rows(
+    sentiment_lda_imdb_s %>% filter(topic == 5),           # Simpson: topic 5
+    sentiment_lda_imdb_g %>% filter(topic == 1)            # Griffin: topic 1
+  ),
+  aes(x = serie, y = sentiment, fill = serie)              # Estetiche: serie sull'asse x, sentiment sull'asse y
+) +
+  geom_boxplot(alpha = 0.8) +                               # Boxplot con leggero effetto trasparenza
+  labs(
+    title = "Confronto sentiment: Topic \"Famiglia\"",
+    x = "Serie",
+    y = "Sentiment"
+  ) +
+  scale_fill_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +     # Colori personalizzati: giallo per S, blu per G
+  theme_minimal()                                           # Tema grafico pulito e minimal
+
+# Grafico dell'andamento del sentiment medio per stagione
+a1 <- bind_rows(
+  sentiment_lda_imdb_s %>% filter(topic == 5) %>% 
+    mutate(stagione = stagione + 1988),             # Simpson: topic 5
+  sentiment_lda_imdb_g %>%
+    filter(topic == 1) %>%
+    mutate(stagione = stagione + 13 + 1988)           # Griffin: si trasla la stagione in avanti di 13
+) %>%
+  group_by(serie, stagione) %>%                            # Si aggregano i dati per serie e stagione
+  summarise(
+    sentiment_medio = mean(sentiment, na.rm = TRUE),       # Si calcola il sentiment medio
+    .groups = "drop"
+  ) %>%
+  ggplot(
+    aes(x = stagione, y = sentiment_medio, color = factor(serie), group = serie)
+  ) +
+  geom_line(size = 0.6) +                                  # Linea per il trend stagionale
+  geom_point(size = 2) +                                   # Punti per evidenziare ogni stagione
+  labs(
+    title = "Andamento del sentiment: Topic \"Famiglia\"",
+    x = "Anno di produzione",
+    y = "Sentiment medio",
+    color = "Serie"
+  ) +
+  scale_color_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori coerenti col boxplot
+  theme_minimal()
+
+# Visualizzazione combinata: affianca boxplot e linea temporale
+b1 + a1 + plot_layout(ncol = 2)                            # Disposizione orizzontale (2 colonne)
+
+```
+
+Il *topic* analizzato ora è quello della Coppia, mantenendo l'analisi con i personaggi per focalizzarsi sulle due coppie principali delle serie: Homer e Marge e Peter e Lois.
+*I Simpson* presentano una distribuzione più positiva per le relazioni di coppia, con mediana chiaramente sopra lo zero e quartili prevalentemente positivi. *I Griffin* mostrano una distribuzione centrata intorno allo zero, suggerendo un approccio più variegato e meno consistentemente positivo. Entrambe hanno una forte variabilità. *I Simpson* mostrano valori di *sentiment* generalmente positivi con diversi picchi, ma senza evidenza di un *trend* temporale stabile. L’andamento appare piuttosto variabile tra le stagioni, segnalando una rappresentazione della relazione con toni talvolta positivi, talvolta neutri, probabilmente legata a episodi dal contenuto emotivo disomogeneo.  Al contrario, ne *I Griffin* il *sentiment* riferito alla coppia Peter e Lois presenta un andamento più definito: cresce progressivamente nelle stagioni centrali, suggerendo una raffigurazione crescentemente positiva del rapporto, seguita da un netto calo nelle ultime due stagioni, che potrebbe riflettere un maggior sarcasmo o conflittualità nella rappresentazione della coppia.
+*I Simpson* hanno tradizionalmente rappresentato Homer e Marge come una coppia solida nonostante i problemi, mentre *I Griffin* hanno oscillato tra rappresentazioni molto ciniche e momenti più romantici di Peter e Lois. Il calo de *I Simpson* nelle stagioni centrali potrebbe riflettere un periodo di maggiore focus sui conflitti matrimoniali nella serie. 
+Nel complesso, l’andamento delle due serie sembra avere una correlazione positiva: nelle stagioni in cui il *sentiment* per una delle due coppie cresce, tende a farlo anche l’altra. Questo parallelismo potrebbe riflettere un’evoluzione simile nella scrittura dei personaggi coniugali o un’influenza reciproca tra le due serie nell’elaborazione della dimensione familiare e affettiva, forse anche influenzata dal contesto sociale del periodo in cui sono scritte le diverse stagioni.
+
+```{r}
+# Homer e Marge vs Peter e Lois - confronto sentimenti su coppia (con personaggi)
+# Topic 3 nei Simpson (dataset 2) e topic 2 nei Griffin (dataset 2)
+
+# Boxplot: confronto distribuzione del sentiment tra Simpson e Griffin per il topic "Coppia" ---
+b1 <- ggplot(
+  bind_rows(
+    sentiment_lda_imdb_s2 %>% filter(topic == 3),        # Simpson dataset 2, topic 3: relazione di coppia
+    sentiment_lda_imdb_g2 %>% filter(topic == 2)         # Griffin dataset 2, topic 2: relazione di coppia
+  ),
+  aes(x = serie, y = sentiment, fill = serie)            # Serie (S o G) sull'asse x, sentiment sull'asse y, colore per serie
+) +
+  geom_boxplot(alpha = 0.8) +                             # Boxplot con trasparenza leggera (alpha = 0.8)
+  labs(
+    title = "Confronto sentiment senza personaggi: \n Topic \"Coppia\"",  # Titolo del grafico
+    x = "Serie",                                           # Etichetta asse x
+    y = "Sentiment"                                        # Etichetta asse y
+  ) +
+  scale_fill_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori: giallo per Simpson, blu per Griffin
+  theme_minimal()                                          # Tema grafico pulito
+
+# Andamento del sentiment medio nel tempo per ciascuna serie ---
+a1 <- bind_rows(
+  sentiment_lda_imdb_s2 %>% filter(topic == 3) %>% 
+    mutate(stagione = stagione + 1988),           # Topic "coppia" Simpson (dataset 2)
+  sentiment_lda_imdb_g2 %>% filter(topic == 2) %>% 
+    mutate(stagione = stagione + 13 + 1988)                      # Per allineare stagioni Griffin dopo le 13 dei Simpson
+) %>%
+  group_by(serie, stagione) %>%
+  summarise(
+    sentiment_medio = mean(sentiment, na.rm = TRUE),      # Calcolo del sentiment medio per stagione e serie
+    .groups = "drop"
+  ) %>%
+  ggplot(
+    aes(x = stagione, y = sentiment_medio, color = factor(serie), group = serie)
+  ) +
+  geom_line(size = 0.6) +                                  # Linea che collega i punti nel tempo
+  geom_point(size = 2) +                                   # Punti singoli per ciascun valore medio
+  labs(
+    title = "Andamento del sentiment senza personaggi: \n Topic \"Coppia\"",  # Titolo grafico
+    x = "Anno di produzione",                                        # Etichetta asse x
+    y = "Sentiment medio",                                 # Etichetta asse y
+    color = "Serie"                                        # Etichetta legenda
+  ) +
+  scale_color_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori coerenti: Simpson oro, Griffin blu
+  theme_minimal()                                          # Tema grafico semplice
+
+# Unione dei due grafici in una sola visualizzazione affiancata ---
+b1 + a1 + plot_layout(ncol = 2)                            # Layout con 2 colonne: boxplot a sinistra, line plot a destra
+
+
+```
+
+Il grafico confronta il *sentiment* espresso nei commenti riguardanti i personaggi nel mondo reale delle due serie, inclusi principalmente nel *topic* riguardante il mondo dello spettacolo.
+Il *boxplot* mostra la distribuzione del *sentiment* complessivo: la distribuzione del *sentiment* nelle due serie resta analogo ai *topic* precedenti, con valori per *I Simpson* maggiormente positivi che per *I Griffin*.
+In particolare, *I Griffin* mostrano maggiore variabilità e oscillazioni più forti, con *sentiment* medio spesso negativo, soprattutto tra le stagioni centrali, che riflettono lo stile della serie: una narrazione spesso irriverente, provocatoria e senza filtri.
+
+```{r}
+# Creazione del boxplot per confrontare la distribuzione del sentiment
+# tra Simpson (topic 2) e Griffin (topic 4) sul tema "Spettacolo/personaggi pubblici"
+b1 <- ggplot(
+  bind_rows(
+    sentiment_lda_imdb_s2 %>% filter(topic == 2),         # Filtra i dati dei Simpson per il topic 2
+    sentiment_lda_imdb_g2 %>% filter(topic == 4)          # Filtra i dati dei Griffin per il topic 4
+  ),
+  aes(x = serie, y = sentiment, fill = serie)             # Estetiche: serie sull'asse x, sentiment sull'asse y
+) +
+  geom_boxplot(alpha = 0.8) +                              # Aggiunge boxplot con trasparenza all'80%
+  labs(
+    title = "Confronto sentiment: Topic \"Spettacolo\"",  # Titolo del grafico
+    x = "Serie",                                           # Etichetta asse x
+    y = "Sentiment"                                        # Etichetta asse y
+  ) +
+  scale_fill_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +    # Colori personalizzati: giallo per Simpson, blu per Griffin
+  theme_minimal()                                          # Tema grafico minimalista
+
+# Creazione del line plot per mostrare l'evoluzione del sentiment medio nel tempo
+a1 <- bind_rows(
+  sentiment_lda_imdb_s2 %>% filter(topic == 2) %>%
+    mutate(stagione = stagione + 1988),           # Seleziona i Simpson topic 2
+  sentiment_lda_imdb_g2 %>% 
+    filter(topic == 4) %>% 
+    mutate(stagione = stagione + 13 + 1988)                      # Aggiunge 13 per allineare le stagioni di Griffin
+) %>%
+  group_by(serie, stagione) %>%                            # Raggruppa per serie e stagione
+  summarise(sentiment_medio = mean(sentiment, na.rm = TRUE), .groups = "drop") %>%  # Calcola la media del sentiment
+  ggplot(
+    aes(x = stagione, y = sentiment_medio, color = factor(serie), group = serie)    # Estetiche per il grafico a linee
+  ) +
+  geom_line(size = 0.6) +                                  # Aggiunge linea del trend
+  geom_point(size = 2) +                                   # Aggiunge punti sulle medie per ogni stagione
+  labs(
+    title = "Andamento del sentiment: Topic \"Spettacolo\"",  # Titolo del grafico
+    x = "Anno di produzione",                                        # Etichetta asse x
+    y = "Sentiment medio",                                 # Etichetta asse y
+    color = "Serie"                                        # Legenda
+  ) +
+  scale_color_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori: giallo Simpson, blu Griffin
+  theme_minimal()                                          # Tema grafico pulito
+
+# Combina i due grafici (boxplot + lineplot) affiancandoli su una riga
+b1 + a1 + plot_layout(ncol = 2)                            # Disposizione dei grafici in 2 colonne
+```
+
+Di seguito, si analizzano i topic relativi ai personaggi più giovani delle due serie.
+I *boxplot* sulla distribuzione del *sentiment* suggeriscono che gli *script* con protagonisti come Stewie e Brian tendano a essere più pungenti, riflessivi o cinici, mentre quelli centrati su Bart siano più leggeri o spensierati.
+Ne *I Simpson* si nota una tendenza stabile, generalmente positiva, con alcuni picchi verso l'alto. Ne *I Griffin*, invece, si mostrano ampie oscillazioni da positivo a fortemente negativo lungo le stagioni, con le stagioni centrali contenenti picchi molto negativi.
+Bart Simpson è un personaggio adolescenziale, dispettoso ma fondamentalmente innocente: gli *script* si affidano all’ironia, al ruolo ribelle ma non drastico, da cui sembra derivare un *sentiment* più equilibrato. Stewie (genio malvagio in miniatura) e Brian (cane parlante, saggio ma cinico) rappresentano personalità più complesse: battute taglienti, riflessioni adulte, satira sociale e istanti esistenziali.
+
+```{r}
+# Bart vs Brian e Stewie: Simpson topic 4, Griffin topic 5
+
+# Confronto distribuzione del sentiment tra Simpson (Bart) e Griffin (Brian & Stewie)
+b1 <- ggplot(
+  bind_rows(
+    sentiment_lda_imdb_s2 %>% filter(topic == 4),       # Filtra topic 4 dei Simpson (riguardante Bart)
+    sentiment_lda_imdb_g2 %>% filter(topic == 5)        # Filtra topic 5 dei Griffin (Brian e Stewie)
+  ),
+  aes(x = serie, y = sentiment, fill = serie)           # Mappa serie sull'asse x, sentiment sull'asse y e colore per serie
+) +
+  geom_boxplot(alpha = 0.8) +                            # Aggiunge boxplot con trasparenza per visualizzare la distribuzione
+  labs(
+    title = "Confronto sentiment con personaggi \n più giovani",  # Titolo del grafico
+    x = "Serie",                                          # Etichetta asse x
+    y = "Sentiment"                                       # Etichetta asse y
+  ) +
+  scale_fill_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori personalizzati: giallo (Simpson), blu (Griffin)
+  theme_minimal()                                        # Tema grafico minimale e pulito
+
+# Evoluzione temporale del sentiment medio per ciascuna serie
+a1 <- bind_rows(
+  sentiment_lda_imdb_s2 %>% filter(topic == 4) %>%
+    mutate(stagione = stagione + 1988),         # Filtra i dati dei Simpson (topic 4)
+  sentiment_lda_imdb_g2 %>% 
+    filter(topic == 5) %>% 
+    mutate(stagione = stagione + 13 + 1988)                    # Aggiunge 13 alle stagioni dei Griffin per allinearle a quelle dei Simpson
+) %>%
+  group_by(serie, stagione) %>%                         # Raggruppa per serie e stagione
+  summarise(
+    sentiment_medio = mean(sentiment, na.rm = TRUE),    # Calcola il sentiment medio per gruppo
+    .groups = "drop"                                     # Rimuove la struttura di grouping dopo il summarise
+  ) %>%
+  ggplot(
+    aes(x = stagione, y = sentiment_medio, color = factor(serie), group = serie)  # Definisce le estetiche
+  ) +
+  geom_line(size = 0.6) +                                # Aggiunge linee per mostrare l’andamento nel tempo
+  geom_point(size = 2) +                                 # Aggiunge punti per ogni media calcolata
+  labs(
+    title = "Andamento del sentiment con personaggi \n più giovani",  # Titolo del grafico
+    x = "Anno di produzione",                                      # Etichetta asse x
+    y = "Sentiment medio",                               # Etichetta asse y
+    color = "Serie"                                      # Titolo della legenda
+  ) +
+  scale_color_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori coerenti con il boxplot
+  theme_minimal()                                        # Tema minimale per coerenza stilistica
+
+# Combinazione dei due grafici affiancati (boxplot + lineplot)
+b1 + a1 + plot_layout(ncol = 2)                          # Dispone i due grafici su due colonne (affiancati)
+
+```
+
+Per quanto riguarda, infine, il *topic* relativo al tempo libero, *I Simpson* mostrano inizialmente un *sentiment* positivo, con un leggero calo centrale, ed una stabilizzazione finale. Le ultime stagioni mostrano un *sentiment* medio costantemente sopra lo zero, con picchi superiori a 0.5.
+*I Griffin*, di nuovo, sono più altalenanti, con una caduta marcata tra le stagioni centrali. Solo nelle stagioni finali si osserva una ripresa del *sentiment* verso valori positivi.
+
+```{r}
+# Tempo libero: Simpson topic 7 e Griffin topic 4
+# Confronto tra le serie per il topic legato al tempo libero
+b1 <- ggplot(
+  bind_rows(
+    sentiment_lda_imdb_s %>% filter(topic == 7),       # Filtra i dati dei Simpson (versione 1) per il topic 7 (tempo libero)
+    sentiment_lda_imdb_g %>% filter(topic == 4)        # Filtra i dati dei Griffin per il topic 4 (tempo libero)
+  ),
+  aes(x = serie, y = sentiment, fill = serie)          # Mappa: serie sull’asse x, sentiment sull’asse y, colore in base alla serie
+) +
+  geom_boxplot(alpha = 0.8) +                           # Boxplot con trasparenza per rendere le box più leggibili
+  labs(
+    title = "Confronto sentiment Topic \"Tempo Libero\"",  # Titolo del grafico
+    x = "Serie",                                        # Etichetta asse x
+    y = "Sentiment"                                     # Etichetta asse y
+  ) +
+  scale_fill_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori personalizzati: giallo (Simpson), blu (Griffin)
+  theme_minimal()                                      # Tema grafico minimale e pulito
+
+# Andamento temporale del sentiment medio per il topic "Tempo libero"
+a1 <- bind_rows(
+  sentiment_lda_imdb_s %>% filter(topic == 7) %>%
+    mutate(stagione = stagione + 1988),         # Filtra i dati dei Simpson (versione 1) per topic 7
+  sentiment_lda_imdb_g %>% 
+    filter(topic == 4) %>% 
+    mutate(stagione = stagione + 13 + 1988)                   # Aggiusta le stagioni dei Griffin sommando 13 per allinearle a quelle dei Simpson
+) %>%
+  group_by(serie, stagione) %>%                        # Raggruppa i dati per serie e stagione
+  summarise(
+    sentiment_medio = mean(sentiment, na.rm = TRUE),   # Calcola la media del sentiment per ogni gruppo
+    .groups = "drop"                                    # Elimina il grouping dopo il summarise
+  ) %>%
+  ggplot(
+    aes(x = stagione, y = sentiment_medio, color = factor(serie), group = serie)  # Definisce le mappature per il grafico
+  ) +
+  geom_line(size = 0.6) +                              # Aggiunge una linea continua per mostrare l’evoluzione nel tempo
+  geom_point(size = 2) +                               # Aggiunge i punti per ogni valore medio calcolato
+  labs(
+    title = "Andamento del sentiment Topic \"Tempo libero\"",  # Titolo del grafico
+    x = "Anno di produzione",                                    # Etichetta asse x
+    y = "Sentiment medio",                             # Etichetta asse y
+    color = "Serie"                                    # Titolo della legenda
+  ) +
+  scale_color_manual(values = c("S" = "#FFD700", "G" = "#1E90FF")) +  # Colori coerenti col boxplot
+  theme_minimal()                                     # Tema minimale per uno stile pulito
+
+# Unisce i due grafici (boxplot + lineplot) affiancati su due colonne
+b1 + a1 + plot_layout(ncol = 2)
+
+```
+
+## Correlazioni con *rating* IMDb
+
+Si è voluto infine indagare, con metodi solo esplorativi, l'andamento del *rating* rilevato da IMDb al variare dei risultati ottenuti precedentemente.
+
+```{r Correlazioni IMDb rating}
+rat_s = imdb$rating[imdb$serie == 'S']
+rat_g = imdb$rating[imdb$serie == 'G']
+sea_s = imdb$stagione[imdb$serie == 'S']
+sea_g = imdb$stagione[imdb$serie == 'G']
+```
+
+Il primo grafico mostra la distribuzione del *rating* di entrambe le serie. Non risultano differenze rilevanti, se si tiene presente la maggior numerosità degli episodi de *I Simpson*, che portano a gonfiare la "pancia" del *boxplot*.
+
+
+```{r}
+# Subset dei dati
+simpson <- imdb %>% filter(serie == "S") %>% mutate(serie = "Simpson")
+griffin  <- imdb %>% filter(serie == "G") %>% mutate(serie = "Griffin")
+
+# Dati unificati per boxplot
+dati_boxplot <- bind_rows(simpson, griffin)
+
+g1 <- ggplot(dati_boxplot, aes(x = serie, y = rating, fill = serie)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("Simpson" = "#FFD700", "Griffin" = "#1E90FF")) +
+  ylim(4, 9.5) +
+  labs(title = "Rating medio per serie") +
+  theme_minimal()
+g1
+```
+
+Il secondo grafico è un'analisi bivariata tra *rating* e stagione delle serie. Il *rating* de *I Simpson* cresce nelle prime 7 stagioni per poi diminuire gradualmente.
+Ne *I Griffin* l'andamento è decrescente, con meno variabilità rispetto a *I Simpson*.
+In generale, si osserva un fenomeno piuttosto frequente: le recensioni del pubblico sono tendenzialmente decrescenti al proseguire delle stagioni.
+
+```{r}
+stagioni_simpson <- levels(factor(simpson$stagione))
+stagioni_mostrati <- stagioni_simpson[as.numeric(stagioni_simpson) %% 2 == 1]  # dispari
+
+g2 <- ggplot(simpson, aes(x = factor(stagione), y = rating)) +
+  geom_boxplot(fill = "#FFD700") +
+  ylim(4, 9.5) +
+  labs(title = "Simpson", x = "Stagione", y = "Rating") +
+  scale_x_discrete(breaks = stagioni_mostrati) +
+  theme_minimal()
+
+g3 <- ggplot(griffin, aes(x = factor(stagione), y = rating)) +
+  geom_boxplot(fill = "#1E90FF") +
+  ylim(4, 9.5) +
+  labs(title = "Griffin", x = "Stagione", y = "Rating") +
+  theme_minimal()
+g2 + g3
+```
+
+Il terzo grafico illustra l'analisi bivariata tra *rating* e *sentiment*. Curiosamente, non sembra esserci correlazione tra le due variabili, né per *I Simpson* né per *I Griffin*.
+
+```{r}
+g4 <- ggplot(sentiment_per_episode_s, aes(x = sentiment, y = rat_s)) +
+  geom_point(color = "#FFD700", alpha = 0.6) +
+  ylim(4, 9.5) +
+  labs(title = "Simpson", x = "Sentiment", y = "Rating") +
+  theme_minimal()
+
+g5 <- ggplot(sentiment_per_episode_g, aes(x = sentiment, y = rat_g)) +
+  geom_point(color = "#1E90FF", alpha = 0.6) +
+  ylim(4, 9.5) +
+  labs(title = "Griffin", x = "Sentiment", y = "Rating") +
+  theme_minimal()
+g4 + g5
+```
+
+## Conclusioni
+
+Nel presente progetto si è condotta un'analisi comparativa approfondita delle serie animate *I Simpson* e *I Griffin*, utilizzando tecniche di text mining, topic modeling e sentiment analysis sui dialoghi degli episodi. I risultati ottenuti confermano empiricamente molte delle differenze percepite tra le due serie e rivelano interessanti dinamiche evolutive nel corso del tempo.
+
+#### Differenze Linguistiche e Stilistiche
+
+L'analisi delle frequenze e della *keyness* hanno evidenziato chiaramente le differenze linguistiche tra le due serie. *I Griffin* si caratterizzano per un linguaggio significativamente più provocatorio, trasgressivo e colorito, con termini come "*hell*" e "*damn*" che ricorrono con frequenza molto superiore rispetto a *I Simpson*. Al contrario, *I Simpson* mantengono un registro più neutro e accessibile, coerente con il loro target familiare più ampio.
+
+L'analisi degli n-grammi ha rivelato in entrambe le serie una forte presenza di dialoghi in prima persona, caratteristica tipica delle *sitcom* familiari, ma con tonalità differenti: *I Griffin* mostrano espressioni più emotive ed enfatiche (quali "w*hat the hell*", "*oh my god*"), mentre *I Simpson* prediligono un linguaggio più quotidiano e moderato.
+
+#### Evoluzione Temporale dei Personaggi
+
+L'analisi longitudinale ha rivelato significativi cambiamenti nell'importanza relativa dei personaggi principali. Ne *I Simpson*, si osserva chiaramente il passaggio da Bart come protagonista iniziale a Homer come figura centrale, confermando quanto dichiarato dal creatore Matt Groening. In *I Griffin*, Peter mantiene una posizione dominante costante, mentre personaggi come Stewie mostrano un crescente rilievo nelle stagioni più recenti.
+
+#### Topic Modeling e Tematiche Ricorrenti
+
+L'applicazione della *Latent Dirichlet Allocation* ha identificato 9 macro-temi comuni alle due serie: Vita familiare, Relazioni sentimentali, Intrattenimento e media, Festività natalizie, Eventi anomali, Ambiente scolastico, Lavoro e denaro, Matrimonio e Politica e attualità. Tuttavia, la trattazione di questi temi differisce sostanzialmente tra le serie, con *I Griffin* che adottano approcci più cinici e provocatori.
+
+L'analisi STM (*Structural Topic Modeling*) ha rivelato interessanti effetti temporali non lineari, suggerendo che l'evoluzione delle serie sia influenzata da fattori complessi che vanno oltre il semplice progredire degli anni. Tra questi fattori, sembra difficile distinguere tra quelli esogeni, relativi al contesto socio-culturale o alle reazioni del pubblico, e quelli endogeni, dovuti ai cambiamenti dei produttori o di altri soggetti nella produzione.
+
+#### Sentiment Analysis e Caratterizzazione Emotiva
+
+La *Sentiment Analysis* ha confermato quantitativamente le differenze di tono percepite tra le serie. *I Simpson* mantengono un sentiment mediamente più positivo e stabile nel tempo, con le prime stagioni caratterizzate da valori relativamente alti. *I Griffin* presentano invece forti oscillazioni e valori generalmente più bassi, riflettendo il loro carattere più controverso.
+
+Particolarmente significativo è l'andamento del sentiment sul tema Famiglia: mentre *I Simpson* mantengono un approccio costantemente affettuoso nonostante la satira, *I Griffin* mostrano un'evoluzione da rappresentazioni inizialmente molto ciniche verso toni progressivamente più positivi nelle stagioni recenti, suggerendo una maturazione della serie nel tempo.
+
+#### Riflessioni Metodologiche
+
+L'approccio multidisciplinare adottato, combinando tecniche di *Text Mining*, *Topic Modeling* e *Sentiment Analysis*, si è rivelato efficace nell'identificare *pattern* nascosti nei testi. Tuttavia, l'analisi ha evidenziato alcuni limiti metodologici, in particolare nella ricerca delle associazioni tra termini, dove la granularità a livello di episodio si è rivelata troppo ampia, richiedendo una segmentazione del testo in finestre più piccole.
+
+#### Considerazioni Finali
+
+Questo studio dimostra come l'analisi quantitativa dei testi possa fornire evidenze empiriche a supporto di percezioni qualitative consolidate. *I Simpson* e *I Griffin*, pur condividendo *format* e alcuni temi ricorrenti, si distinguono nettamente per approccio linguistico, trattamento tematico e evoluzione temporale. 
+
+*I Simpson* emergono come una serie più stabile e *family-friendly*, capace di mantenere un equilibrio tra satira sociale e valori familiari positivi. *I Griffin* si caratterizzano invece per un approccio più sperimentale e provocatorio, con una minore variabilità tematica e lessicale, ma allo stesso tempo un'evoluzione del tono più marcata nel corso del tempo. Un’estensione metodologica del presente lavoro potrebbe consistere in un’indagine approfondita sull’origine dell’eterogeneità tra le due serie a livello intra-episodico, al fine di valutare se i risultati rilevati siano attribuibili a strutture ricorrenti presenti a una scala più fine rispetto a quella sinora esaminata.
+
+I risultati ottenuti aprono interessanti prospettive per future ricerche, sia nell'approfondimento dell'analisi comparativa di prodotti mediali simili, sia nell'applicazione di tecniche di analisi testuale più sofisticate per catturare sfumature semantiche e narrative più sottili. L'integrazione di metadati esterni (come i riassunti IMDb) si è rivelata particolarmente utile per la validazione e interpretazione dei risultati del *Topic Modeling*, suggerendo direzioni promettenti per analisi future più complete e contestualizzate.
