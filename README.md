@@ -88,9 +88,8 @@ stagioni recenti.
   <img src="figures/sentiment_per_topic_anno.png" width="80%" alt="Andamento del sentiment per topic e anno">
 </p>
 
-> 📄 Il report completo con tutti i grafici è
-> [`report/progetto_completo.html`](report/progetto_completo.html) (scaricabile e
-> apribile nel browser).
+> 📄 Il report completo si genera compilando [`report/progetto_completo.Rmd`](report/progetto_completo.Rmd)
+> con `rmarkdown::render()`: produce un HTML con testo, grafici e codice (vedi [Come riprodurre](#come-riprodurre)).
 
 ## Come riprodurre
 
@@ -133,8 +132,7 @@ rmarkdown::render("report/progetto_completo.Rmd")
 │   ├── 06_sentiment.R        # sentiment analysis (serie / topic / tempo)
 │   └── 07_associations.R     # associazioni tra termini
 ├── report/
-│   ├── progetto_completo.Rmd   # report riproducibile (fonte)
-│   └── progetto_completo.html  # report renderizzato
+│   └── progetto_completo.Rmd   # report riproducibile (sorgente, si compila in HTML)
 ├── figures/                # grafici selezionati per il README
 ├── data/                   # vuota: i dati si rigenerano (vedi data/README.md)
 ├── index.html              # landing page per GitHub Pages (link al report)
